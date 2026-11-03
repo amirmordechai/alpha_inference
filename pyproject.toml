@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "alpha-inference"
+version = "0.2.0"
+description = "Optimize GenAI inference on Vertex AI Endpoints & GPU VMs using official Google Cloud AlphaEvolve."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
+dependencies = [
+    "aiohttp>=3.9.0",
+    "google-auth>=2.28.0",
+    "google-cloud-aiplatform>=1.60.0",
+    "matplotlib>=3.8.0",
+    "nest-asyncio>=1.6.0",
+    "numpy>=1.26.0",
+    "pydantic>=2.6.0",
+    "python-dotenv>=1.0.0",
+    "requests>=2.31.0",
+    "alpha-evolve @ git+https://github.com/Google-Cloud-AI/alphaevolve-on-googlecloud.git",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0.0"]
+
+[tool.setuptools.packages.find]
+include = ["alpha_inference*"]
+
+[tool.setuptools.package-data]
+alpha_inference = ["problem.md"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
