@@ -57,16 +57,17 @@ from alpha_inference.evaluator import (
     to_alpha_evolve_score,
 )
 from alpha_inference.reporting import (
+    ACCELERATOR_TYPE,
     CandidateSpec,
     append_results_tsv,
     build_seed_program_source,
     capture_gpu_profile,
     deploy_search_vertex_endpoint,
     extract_flag_value,
+    inspect_vertex_endpoint,
     parse_candidate_code,
     plot_progress_chart,
     reload_endpoint,
-    sync_deploy_best_script,
     validate_candidate_spec,
     write_articulated_summary,
 )
@@ -139,6 +140,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--confirm-wins", action="store_true", help="Re-verify new record candidates before promoting")
 
     # Endpoint / Vertex AI settings
+    p.add_argument("--vertex-endpoint-id", default="", help="Live Vertex AI Endpoint ID(s), comma-separated")
+    p.add_argument("--endpoint-json", default="", help="JSON file emitted by `deploy.py --out-json`")
     p.add_argument("--endpoint", "--endpoint-url", dest="endpoint", default="", help="Existing reload_proxy URL(s), comma-separated")
     p.add_argument("--admin-token", default="", help="Admin token(s) for reload_proxy hot-swap")
     p.add_argument("--deploy-vertex", action="store_true", help="Provision Dedicated Vertex AI GPU Endpoint(s)")
@@ -220,6 +223,24 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
         return round(hrs * args.hourly_gpu_usd * n_gpus + ae_api_spend_est, 4)
 
     try:
+        # Optional: inspect live --vertex-endpoint-id(s) or --endpoint-json
+        explicit_toks = [t.strip() for t in args.admin_token.split(",") if t.strip()]
+        if args.endpoint_json:
+            ep_obj = json.loads(Path(args.endpoint_json).read_text(encoding="utf-8"))
+            if ep_obj.get("chat_completions_url"):
+                worker_pool.append((len(worker_pool), str(ep_obj["chat_completions_url"]), str(ep_obj.get("admin_token", ""))))
+
+        ep_ids = [eid.strip() for eid in args.vertex_endpoint_id.split(",") if eid.strip()]
+        inspected_eps = [inspect_vertex_endpoint(args.project_id, args.region, eid) for eid in ep_ids]
+        if inspected_eps and not args.model.strip() and inspected_eps[0].get("vllm_args"):
+            live_args = inspected_eps[0]["vllm_args"]
+            if live_args and live_args[0] != baseline_cand.vllm_args[0]:
+                seed_source = build_seed_program_source(live_args[0], args.served_model_name)
+                baseline_cand = parse_candidate_code(seed_source, name="cand_000_baseline")
+                served_model = extract_flag_value(baseline_cand.vllm_args, "--served-model-name") or baseline_cand.vllm_args[0]
+                resolved_mode = detect_task_mode(trace_rows, requested_mode=args.task_mode, model_name=baseline_cand.vllm_args[0])
+                (out_dir / "candidates" / "cand_000_baseline.py").write_text(seed_source, encoding="utf-8")
+
         # 1. Provision or attach GPU worker pool
         if args.deploy_vertex:
             logger.info("Provisioning %d parallel Vertex AI Dedicated GPU Endpoint(s) in %s...", num_workers, args.region)
@@ -251,18 +272,30 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
                         "worker_idx": len(worker_pool) - 1,
                         "deploy_wall_sec": item.get("deploy_wall_sec", 0.0),
                         "machine_type": "g4-standard-48",
-                        "accelerator_type": "NVIDIA_RTX_PRO_6000",
+                        "accelerator_type": ACCELERATOR_TYPE,
                     })
             (out_dir / "search_endpoints.json").write_text(json.dumps(ep_meta, indent=2) + "\n", encoding="utf-8")
         else:
+            for idx, ep_info in enumerate(inspected_eps):
+                tok = explicit_toks[idx] if idx < len(explicit_toks) else (explicit_toks[0] if explicit_toks else ep_info["admin_token"])
+                if not tok:
+                    raise RuntimeError(
+                        f"Vertex Endpoint {ep_info['endpoint_id']} does not have hot-reload enabled yet. "
+                        f"Either pass --deploy-vertex to spin up temporary search workers, or enable hot-reload on it via: "
+                        f"python deploy.py --endpoint-id {ep_info['endpoint_id']} --hot-reload --deploy"
+                    )
+                worker_pool.append((len(worker_pool), ep_info["chat_completions_url"], tok))
+
             urls = [u.strip() for u in args.endpoint.split(",") if u.strip()]
-            toks = [t.strip() for t in args.admin_token.split(",") if t.strip()] if args.admin_token else [""]
-            if len(toks) == 1 and len(urls) > 1:
-                toks = toks * len(urls)
-            worker_pool = [(i, u, t) for i, (u, t) in enumerate(zip(urls, toks))]
+            if urls:
+                toks = explicit_toks if explicit_toks else [""]
+                if len(toks) == 1 and len(urls) > 1:
+                    toks = toks * len(urls)
+                for u, t in zip(urls, toks):
+                    worker_pool.append((len(worker_pool), u, t))
 
         if not worker_pool:
-            raise RuntimeError("No active GPU endpoints available. Pass --deploy-vertex or --endpoint.")
+            raise RuntimeError("No active GPU endpoints available. Pass --vertex-endpoint-id, --endpoint-json, --endpoint, or --deploy-vertex.")
 
         use_gcp_auth = (not args.no_gcp_auth) and (
             args.deploy_vertex or "prediction.vertexai" in worker_pool[0][1] or ":rawPredict" in worker_pool[0][1]
@@ -319,7 +352,6 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
         best_res = base_res
         best_val = base_res.metric_value(canon_metric)
         (out_dir / "best_candidate.py").write_text(seed_source, encoding="utf-8")
-        sync_deploy_best_script(best_cand, source_path=str(out_dir / "best_candidate.py"))
 
         append_results_tsv(tsv_path, 0, "seed_000", "baseline", baseline_cand, base_res)
         plot_progress_chart(tsv_path, png_path, metric=canon_metric)
@@ -518,7 +550,6 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
                             }
                         )
                         (out_dir / "best_candidate.py").write_text(code, encoding="utf-8")
-                        sync_deploy_best_script(best_cand, source_path=str(out_dir / "best_candidate.py"))
                         refresh_prof = True
 
                     append_results_tsv(tsv_path, it_num, prog_id[:10], status, cand, res)

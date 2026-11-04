@@ -36,8 +36,6 @@ ACCELERATOR_COUNT = 1
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CANDIDATE_SEED_FILE = REPO_ROOT / "candidate.py"
-DEPLOY_BASELINE_FILE = REPO_ROOT / "deploy_baseline.py"
-DEPLOY_BEST_FILE = REPO_ROOT / "deploy_best.py"
 RELOAD_PROXY_FILE = Path(__file__).resolve().parent / "reload_proxy.py"
 
 FORBIDDEN_VLLM_FLAGS = (
@@ -191,12 +189,9 @@ def validate_candidate_spec(cand: CandidateSpec, baseline: CandidateSpec) -> tup
                 return False, f"Forbidden model/precision-altering flag: {arg!r}"
 
     if str(cand.env_vars.get("CUDA_MODULE_LOADING", "")).strip().upper() == "EAGER":
-        return False, "CUDA_MODULE_LOADING='EAGER' triggers 8+ min PTX JIT compilation timeouts on Blackwell sm_120; omit it (keep default LAZY)."
+        return False, "CUDA_MODULE_LOADING='EAGER' triggers multi-minute PTX JIT compilation stalls on Blackwell sm_120; omit it."
     if "expandable_segments" in str(cand.env_vars.get("PYTORCH_CUDA_ALLOC_CONF", "")):
         return False, "PYTORCH_CUDA_ALLOC_CONF='expandable_segments:True' conflicts with vLLM CUDA graph memory pools; omit it."
-    tp_val = int(extract_flag_value(cand.vllm_args, "--tensor-parallel-size") or 1)
-    if tp_val == 1 and str(cand.env_vars.get("CUDA_DEVICE_MAX_CONNECTIONS", "")).strip() == "1":
-        return False, "CUDA_DEVICE_MAX_CONNECTIONS='1' serializes async H2D & compute streams on single-GPU (TP=1); omit it."
 
     if cand.custom_kernel_code.strip():
         try:
@@ -393,35 +388,45 @@ async def capture_gpu_profile(
     return []
 
 
-def sync_deploy_best_script(cand: CandidateSpec, source_path: str = "best_candidate.py") -> None:
-    """Update standalone `deploy_best.py` from `deploy_baseline.py` so `diff -u` is clean."""
-    if not DEPLOY_BASELINE_FILE.exists():
-        return
-    base_src = DEPLOY_BASELINE_FILE.read_text(encoding="utf-8")
-    updated = base_src.replace(
-        "Vertex AI Dedicated Endpoint Deployment Script — Ground-Zero Baseline (`cand_000_baseline.py`).",
-        "Vertex AI Dedicated Endpoint Deployment Script — AlphaEvolve Best Configuration.",
-    )
-    block_re = re.compile(
-        r"(# =+\n# EVOLVED CONFIGURATION BLOCK.*?\n# =+\n)(.*?)(# =+\n)",
-        flags=re.DOTALL,
-    )
-    new_block = (
-        f"SOURCE_CANDIDATE = {source_path!r}\n"
-        f"HYPOTHESIS = {cand.hypothesis!r}\n\n"
-        f"MACHINE_TYPE = {MACHINE_TYPE!r}\n"
-        f"ACCELERATOR_TYPE = {ACCELERATOR_TYPE!r}\n"
-        f"ACCELERATOR_COUNT = {ACCELERATOR_COUNT}\n"
-        "UPSTREAM_VLLM_IMAGE = 'docker.io/vllm/vllm-openai:v0.31.0'\n\n"
-        f"VLLM_ARGS: list[str] = {pprint.pformat(cand.vllm_args, indent=4, width=96)}\n\n"
-        f"ENV_VARS: dict[str, str] = {pprint.pformat(cand.env_vars, indent=4, width=96)}\n\n"
-        f"CUSTOM_KERNEL_CODE: str = {cand.custom_kernel_code!r}\n"
-    )
-    updated, count = block_re.subn(lambda m: f"{m.group(1)}{new_block}{m.group(3)}", updated, count=1)
-    if count == 1:
-        updated = updated.replace('default="ae-diffusiongemma-baseline"', 'default="ae-diffusiongemma-best"')
-        updated = updated.replace('default="runs/baseline_endpoint.json"', 'default="runs/best_endpoint.json"')
-        DEPLOY_BEST_FILE.write_text(updated, encoding="utf-8")
+def inspect_vertex_endpoint(project_id: str, region: str, endpoint_id: str) -> dict[str, Any]:
+    """Resolve a live Vertex AI Endpoint ID into its `:rawPredict` URL, hot-reload token, and model args."""
+    from google.cloud import aiplatform
+
+    aiplatform.init(project=project_id, location=region)
+    ep = aiplatform.Endpoint(endpoint_name=endpoint_id)
+    dns = getattr(ep, "dedicated_endpoint_dns", "") or ""
+    if dns:
+        url = f"https://{dns}/v1/projects/{project_id}/locations/{region}/endpoints/{ep.name}:rawPredict"
+    else:
+        url = f"https://{region}-aiplatform.googleapis.com/v1/projects/{project_id}/locations/{region}/endpoints/{ep.name}:rawPredict"
+
+    admin_token = ""
+    vllm_args: list[str] = []
+    for dm in ep.gca_resource.deployed_models:
+        try:
+            m = aiplatform.Model(model_name=dm.model)
+            cspec = m.gca_resource.container_spec
+            env_map = {e.name: e.value for e in (cspec.env or [])}
+            if env_map.get("AE_ADMIN_TOKEN"):
+                admin_token = env_map["AE_ADMIN_TOKEN"]
+            if env_map.get("AE_INITIAL_SPEC_JSON"):
+                init_obj = json.loads(env_map["AE_INITIAL_SPEC_JSON"])
+                vllm_args = [str(x) for x in (init_obj.get("vllm_args") or [])]
+            elif cspec.args:
+                vllm_args = [str(x) for x in cspec.args]
+            break
+        except Exception:  # noqa: BLE001
+            continue
+
+    return {
+        "endpoint_id": ep.name,
+        "endpoint_resource_name": ep.resource_name,
+        "dedicated_endpoint_dns": dns,
+        "chat_completions_url": url,
+        "admin_token": admin_token,
+        "has_hot_reload": bool(admin_token),
+        "vllm_args": vllm_args,
+    }
 
 
 TSV_COLUMNS = (

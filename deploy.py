@@ -2,17 +2,19 @@
 """Standalone Vertex AI Dedicated Endpoint deployer for any `candidate.py` / `best_candidate.py`.
 
 Usage:
-    # Preview container launch spec ($0 spend):
+    # 1. Need a live Vertex AI GPU Endpoint? Deploy any HuggingFace model in 1 command:
+    python deploy.py --model google/gemma-4-26B-A4B-it --hot-reload --deploy --out-json endpoint.json
+
+    # 2. Preview container launch spec ($0 spend):
     python deploy.py --config candidate.py --dry-run
 
-    # Compare Ground-Zero Baseline vs. AlphaEvolve Best:
+    # 3. Compare Ground-Zero Baseline vs. AlphaEvolve Best:
     python deploy.py --diff
 
-    # Deploy Baseline or Winning Evolved configuration to a Vertex AI Dedicated Endpoint:
-    python deploy.py --config candidate.py --display-name ae-baseline --deploy
-    python deploy.py --config examples/email_triage/results/best_candidate.py --display-name ae-best --deploy
+    # 4. Roll out the winning configuration to a new or existing Vertex AI Endpoint:
+    python deploy.py --config examples/email_triage/results/best_candidate.py --endpoint-id <ENDPOINT_ID> --deploy
 
-    # Tear down an endpoint ($0/hr active compute):
+    # 5. Tear down an endpoint ($0/hr active compute):
     python deploy.py --delete --endpoint-id <ENDPOINT_ID>
 """
 
@@ -23,6 +25,7 @@ import base64
 import difflib
 import json
 import os
+import secrets
 import subprocess
 import sys
 import time
@@ -36,7 +39,9 @@ from alpha_inference.reporting import (
     ACCELERATOR_COUNT,
     ACCELERATOR_TYPE,
     MACHINE_TYPE,
+    RELOAD_PROXY_FILE,
     CandidateSpec,
+    build_seed_program_source,
     parse_candidate_code,
 )
 
@@ -118,15 +123,46 @@ def load_candidate_file(config_path: str | Path) -> CandidateSpec:
     return parse_candidate_code(p.read_text(encoding="utf-8"), name=p.stem)
 
 
-def build_container_launch_spec(cand: CandidateSpec) -> tuple[list[str], list[str], dict[str, str]]:
-    """Build Vertex container command, args, and env vars (injecting custom Triton kernel if present)."""
-    env = dict(cand.env_vars)
+def build_container_launch_spec(
+    cand: CandidateSpec,
+    *,
+    hot_reload: bool = False,
+    admin_token: str = "",
+) -> tuple[list[str], list[str], dict[str, str], str]:
+    """Build Vertex container command, args, env vars, and optional hot-reload admin token."""
     hf_token = os.environ.get("HF_TOKEN", "").strip()
+    if hot_reload:
+        tok = admin_token or secrets.token_urlsafe(24)
+        proxy_b64 = base64.b64encode(RELOAD_PROXY_FILE.read_bytes()).decode("ascii")
+        init_spec = json.dumps(
+            {
+                "vllm_args": cand.vllm_args,
+                "env_vars": cand.env_vars,
+                "custom_kernel_code": cand.custom_kernel_code,
+                "startup_timeout_sec": 900.0,
+            }
+        )
+        env = {
+            "AE_ADMIN_TOKEN": tok,
+            "AE_PROXY_B64": proxy_b64,
+            "AE_INITIAL_SPEC_JSON": init_spec,
+            "PYTHONUNBUFFERED": "1",
+        }
+        if hf_token:
+            env["HF_TOKEN"] = hf_token
+        bootstrap = (
+            'python3 -c "import base64, os, pathlib; '
+            "pathlib.Path('/tmp/reload_proxy.py').write_bytes(base64.b64decode(os.environ['AE_PROXY_B64']))\" && "
+            "exec python3 /tmp/reload_proxy.py"
+        )
+        return ["bash", "-lc", bootstrap], [], env, tok
+
+    env = dict(cand.env_vars)
     if hf_token:
         env["HF_TOKEN"] = hf_token
 
     if not cand.custom_kernel_code.strip():
-        return ["vllm", "serve"], list(cand.vllm_args), env
+        return ["vllm", "serve"], list(cand.vllm_args), env, ""
 
     env["AE_KERNEL_B64"] = base64.b64encode(cand.custom_kernel_code.encode("utf-8")).decode("ascii")
     bootstrap = (
@@ -136,7 +172,7 @@ def build_container_launch_spec(cand: CandidateSpec) -> tuple[list[str], list[st
         'export PYTHONPATH="/tmp/ae_kernel:${PYTHONPATH:-}" && '
         'exec vllm serve "$@"'
     )
-    return ["bash", "-lc", bootstrap, "--"], list(cand.vllm_args), env
+    return ["bash", "-lc", bootstrap, "--"], list(cand.vllm_args), env, ""
 
 
 def deploy_candidate_to_vertex(
@@ -152,6 +188,7 @@ def deploy_candidate_to_vertex(
     machine_type: str = MACHINE_TYPE,
     accelerator_type: str = ACCELERATOR_TYPE,
     accelerator_count: int = ACCELERATOR_COUNT,
+    hot_reload: bool = False,
 ) -> dict[str, Any]:
     """Deploy a `CandidateSpec` to a new or existing Vertex AI Dedicated GPU Endpoint."""
     from google.cloud import aiplatform
@@ -163,7 +200,7 @@ def deploy_candidate_to_vertex(
         if skip_mirror
         else ensure_ar_image_mirrored(project_id, region, ar_repo)
     )
-    cmd, args, env = build_container_launch_spec(cand)
+    cmd, args, env, admin_token = build_container_launch_spec(cand, hot_reload=hot_reload)
 
     model = aiplatform.Model.upload(
         display_name=f"{display_name}-model",
@@ -217,7 +254,7 @@ def deploy_candidate_to_vertex(
 
     endpoint = aiplatform.Endpoint(endpoint.resource_name)
     dns = getattr(endpoint, "dedicated_endpoint_dns", "") or ""
-    return {
+    res = {
         "deployed_at_utc": datetime.now(timezone.utc).isoformat(),
         "source_candidate": str(source_path),
         "plain_title": cand.plain_title,
@@ -230,8 +267,12 @@ def deploy_candidate_to_vertex(
             if dns
             else ""
         ),
+        "hot_reload_enabled": hot_reload,
         "total_deploy_sec": round(time.perf_counter() - t0, 2),
     }
+    if admin_token:
+        res["admin_token"] = admin_token
+    return res
 
 
 def teardown_endpoint(project_id: str, region: str, endpoint_id: str) -> None:
@@ -262,6 +303,8 @@ def main() -> None:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--config", default=default_cfg, help="Path to candidate.py or best_candidate.py")
+    parser.add_argument("--model", default="", help="Optional HuggingFace model ID (generates clean seed config on the fly)")
+    parser.add_argument("--served-model-name", default="", help="Optional --served-model-name when using --model")
     parser.add_argument("--baseline-config", default="candidate.py", help="Baseline candidate file for --diff")
     parser.add_argument("--diff", action="store_true", help="Print unified diff between --baseline-config and --config")
     parser.add_argument("--project-id", default=os.environ.get("GCP_PROJECT_ID", ""))
@@ -271,7 +314,8 @@ def main() -> None:
     parser.add_argument("--accelerator-type", default=ACCELERATOR_TYPE)
     parser.add_argument("--accelerator-count", type=int, default=ACCELERATOR_COUNT)
     parser.add_argument("--display-name", default="ae-inference-endpoint")
-    parser.add_argument("--endpoint-id", default="", help="Existing endpoint ID (for A/B traffic split or --delete)")
+    parser.add_argument("--endpoint-id", default="", help="Existing endpoint ID (for rollout, A/B split, or --delete)")
+    parser.add_argument("--hot-reload", action="store_true", help="Deploy with reload_proxy so optimize.py can hot-swap in place")
     parser.add_argument("--traffic-pct", type=int, default=100)
     parser.add_argument("--skip-mirror", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
@@ -294,18 +338,29 @@ def main() -> None:
         teardown_endpoint(args.project_id, args.region, args.endpoint_id)
         return
 
-    cand = load_candidate_file(args.config)
-    cmd, vllm_args, env = build_container_launch_spec(cand)
-    safe_env = {k: ("***REDACTED***" if k == "HF_TOKEN" else v) for k, v in env.items() if k != "AE_KERNEL_B64"}
+    if args.model.strip():
+        cand = parse_candidate_code(build_seed_program_source(args.model, args.served_model_name), name="model_seed")
+        src_label = f"--model {args.model.strip()}"
+    else:
+        cand = load_candidate_file(args.config)
+        src_label = args.config
+
+    cmd, vllm_args, env, _tok = build_container_launch_spec(cand, hot_reload=args.hot_reload)
+    safe_env = {
+        k: ("***REDACTED***" if k in ("HF_TOKEN", "AE_ADMIN_TOKEN") else v)
+        for k, v in env.items()
+        if k not in ("AE_KERNEL_B64", "AE_PROXY_B64")
+    }
     spec_preview = {
-        "source_candidate": args.config,
+        "source_candidate": src_label,
         "plain_title": cand.plain_title,
         "hypothesis": cand.hypothesis,
         "category": cand.category,
         "machine_type": args.machine_type,
         "accelerator_type": args.accelerator_type,
+        "hot_reload_enabled": args.hot_reload,
         "container_command": cmd,
-        "vllm_args": vllm_args,
+        "vllm_args": cand.vllm_args if args.hot_reload else vllm_args,
         "env_vars": safe_env,
         "has_custom_kernel": bool(cand.custom_kernel_code.strip()),
     }
@@ -322,13 +377,14 @@ def main() -> None:
         region=args.region,
         ar_repo=args.ar_repo,
         display_name=args.display_name,
-        source_path=args.config,
+        source_path=src_label,
         existing_endpoint_id=args.endpoint_id,
         traffic_percentage=args.traffic_pct,
         skip_mirror=args.skip_mirror,
         machine_type=args.machine_type,
         accelerator_type=args.accelerator_type,
         accelerator_count=args.accelerator_count,
+        hot_reload=args.hot_reload,
     )
     if args.out_json:
         out = Path(args.out_json)

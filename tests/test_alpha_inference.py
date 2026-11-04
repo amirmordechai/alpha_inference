@@ -186,13 +186,25 @@ def test_realtime_replay_and_kl_equivalence_against_mock_server() -> None:
 
 def test_cli_dry_runs_succeed() -> None:
     for cmd in (
-        [sys.executable, "optimize.py", "--dry-run"],
-        [sys.executable, "validate.py", "--dry-run"],
+        [sys.executable, "optimize.py", "--vertex-endpoint-id", "1234567890", "--dry-run"],
+        [sys.executable, "validate.py", "--baseline-endpoint-id", "111", "--best-endpoint-id", "222", "--dry-run"],
         [sys.executable, "deploy.py", "--config", "candidate.py", "--dry-run"],
+        [sys.executable, "deploy.py", "--model", "google/gemma-4-26B-A4B-it", "--hot-reload", "--dry-run"],
     ):
         proc = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True, check=True)
         payload = json.loads(proc.stdout)
         assert isinstance(payload, dict)
+
+
+def test_coding_agent_onboarding_skill_present() -> None:
+    skill_md = REPO_ROOT / ".agents" / "skills" / "alpha-inference" / "SKILL.md"
+    agents_md = REPO_ROOT / "AGENTS.md"
+    readme_md = REPO_ROOT / "README.md"
+    assert skill_md.exists(), "Missing .agents/skills/alpha-inference/SKILL.md"
+    assert agents_md.exists(), "Missing AGENTS.md"
+    skill_txt = skill_md.read_text(encoding="utf-8")
+    assert skill_txt.startswith("---\nname: alpha-inference\n")
+    assert ".agents/skills/alpha-inference/SKILL.md" in readme_md.read_text(encoding="utf-8")
 
 
 def test_repo_has_zero_leaked_project_ids_or_blog_clutter() -> None:

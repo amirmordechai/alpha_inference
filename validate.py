@@ -54,7 +54,7 @@ from alpha_inference.evaluator import (
     parse_timestamp_sec,
     replay_trace_realtime,
 )
-from alpha_inference.reporting import extract_flag_value
+from alpha_inference.reporting import extract_flag_value, inspect_vertex_endpoint
 
 logger = logging.getLogger("alpha_inference.validate")
 
@@ -77,6 +77,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p.add_argument("--baseline-config", default="candidate.py", help="Path to Baseline candidate.py")
     p.add_argument("--best-config", default="", help="Path to evolved best_candidate.py (defaults to <out-dir>/best_candidate.py)")
+    p.add_argument("--baseline-endpoint-id", default="", help="Existing Baseline Vertex AI Endpoint ID")
+    p.add_argument("--best-endpoint-id", default="", help="Existing Best Evolved Vertex AI Endpoint ID")
     p.add_argument("--baseline-url", default="", help="Existing Baseline endpoint URL")
     p.add_argument("--best-url", default="", help="Existing Best Evolved endpoint URL")
     p.add_argument("--deploy-vertex", action="store_true", help="Deploy standalone Baseline & Best Vertex GPU Endpoints")
@@ -391,9 +393,14 @@ async def run_validation(args: argparse.Namespace) -> dict[str, Any]:
             provisioned.extend([base_ep["endpoint_id"], best_ep["endpoint_id"]])
             base_url = base_ep["chat_completions_url"]
             best_url = best_ep["chat_completions_url"]
+        else:
+            if args.baseline_endpoint_id.strip():
+                base_url = inspect_vertex_endpoint(args.project_id, args.region, args.baseline_endpoint_id.strip())["chat_completions_url"]
+            if args.best_endpoint_id.strip():
+                best_url = inspect_vertex_endpoint(args.project_id, args.region, args.best_endpoint_id.strip())["chat_completions_url"]
 
         if not base_url or not best_url:
-            raise RuntimeError("Provide --deploy-vertex or both --baseline-url and --best-url.")
+            raise RuntimeError("Provide --deploy-vertex, --baseline-endpoint-id/--best-endpoint-id, or --baseline-url/--best-url.")
 
         use_gcp_auth = (not args.no_gcp_auth) and (
             args.deploy_vertex or "prediction.vertexai" in base_url or ":rawPredict" in base_url
@@ -465,6 +472,14 @@ async def run_validation(args: argparse.Namespace) -> dict[str, Any]:
         )
 
         # Verify live Layer-2 KL output equivalence directly between Baseline and Best across all unseen requests
+        cal_dict: dict[str, float] | None = None
+        cal_path = Path(args.out_dir) / "baseline_responses.calibration.json"
+        if cal_path.exists():
+            try:
+                cal_dict = json.loads(cal_path.read_text(encoding="utf-8"))
+            except Exception:  # noqa: BLE001
+                cal_dict = None
+
         base_by_id = {p.request_id: p for _, p in base_preds}
         best_only = [p for _, p in best_preds if p.request_id in base_by_id]
         if resolved_mode == "jev_diffusion":
@@ -473,6 +488,7 @@ async def run_validation(args: argparse.Namespace) -> dict[str, Any]:
                 candidate_responses=[p for p in best_only if isinstance(p, ParsedJevResponse)],
                 num_expected=len(best_only),
                 num_failed_http=best_fails,
+                calibration=cal_dict,
             )
         else:
             eq_rep = compare_chat_responses_kl(
@@ -480,6 +496,7 @@ async def run_validation(args: argparse.Namespace) -> dict[str, Any]:
                 candidate_responses=[p for p in best_only if isinstance(p, ParsedChatResponse)],
                 num_expected=len(best_only),
                 num_failed_http=best_fails,
+                calibration=cal_dict,
             )
 
         def _summarize(preds: list[tuple[float, Any]], fails: int, wall: float, sat: float, buckets: list[dict[str, float]]) -> dict[str, Any]:

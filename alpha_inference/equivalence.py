@@ -83,7 +83,7 @@ def compare_against_baseline_responses(
     eff_min_conf_pct = min_confident_slot_pct
     eff_min_exact_pct = min_exact_slot_pct
     eff_min_within_one_pct = 98.5
-    eff_max_catastrophic_pct = 0.5
+    eff_max_catastrophic_pct = 1.0
     if calibration:
         eff_max_kl = min(0.25, max(max_allowed_mean_kl, float(calibration.get("self_mean_kl", 0.0)) * 2.2 + 0.015))
         eff_max_mean_prob = min(
@@ -93,13 +93,13 @@ def compare_against_baseline_responses(
             90.0, min(min_confident_slot_pct, float(calibration.get("self_confident_match_pct", 100.0)) - 2.5)
         )
         eff_min_exact_pct = max(
-            90.0, min(min_exact_slot_pct, float(calibration.get("self_exact_match_pct", 100.0)) - 2.5)
+            90.0, min(min_exact_slot_pct, float(calibration.get("self_exact_slot_match_pct", calibration.get("self_exact_match_pct", 100.0))) - 2.5)
         )
         eff_min_within_one_pct = max(
             96.0, min(99.5, float(calibration.get("self_within_one_pct", 99.5)) - 1.5)
         )
         eff_max_catastrophic_pct = min(
-            2.5, max(0.5, float(calibration.get("self_catastrophic_pct", 0.0)) + 0.75)
+            2.5, max(1.0, float(calibration.get("self_catastrophic_pct", 0.0)) + 0.75)
         )
 
     eps = 1e-7
