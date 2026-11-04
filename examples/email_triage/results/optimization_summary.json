@@ -1,0 +1,39 @@
+{
+  "completed_at_utc": "2026-11-03T22:06:15Z",
+  "alpha_evolve_experiment_id": "10256809673523924228",
+  "metric": "p99_latency",
+  "baseline_value": 992.13,
+  "best_value": 952.11,
+  "delta_pct": -4.03,
+  "baseline_p99_ms": 992.13,
+  "best_p99_ms": 952.11,
+  "baseline_throughput_rps": 46.49,
+  "best_throughput_rps": 46.92,
+  "best_kl_divergence": 0.07183,
+  "best_exact_match_pct": 94.17,
+  "programs_evaluated": 242,
+  "kept_breakthroughs": [
+    {
+      "iteration": 1,
+      "candidate_id": "1367975610",
+      "category": "vllm_flags",
+      "plain_title": "Optimized Micro-Batching & Minimal Logprobs",
+      "p99_latency_ms": 976.57,
+      "p50_latency_ms": 513.91,
+      "throughput_rps": 44.22,
+      "hypothesis": "Optimize P99 latency by reducing max-logprobs to 5, lowering max-num-seqs to 12, capping max-num-batched-tokens, disabling access logs, and increasing KV cache memory utilization to 0.95."
+    },
+    {
+      "iteration": 136,
+      "candidate_id": "1130175493",
+      "category": "cuda_graphs",
+      "plain_title": "Optimized CUDA Graph Ladder & Moderate Micro-Batching",
+      "p99_latency_ms": 952.11,
+      "p50_latency_ms": 511.86,
+      "throughput_rps": 46.92,
+      "hypothesis": "Using a moderate micro-batching limit (seqs=24, tokens=4096) absorbs arrival bursts to prevent host-side queueing without causing mega-batch slowdowns. Combining this with a dense CUDA graph capture ladder up to 2048 tokens bypasses CPU launch overhead. We also lower OMP_NUM_THREADS to 4 to reduce CPU core scheduling contention."
+    }
+  ],
+  "total_spend_usd": 65.0074,
+  "out_dir": "examples/email_triage/results"
+}

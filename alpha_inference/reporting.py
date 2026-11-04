@@ -517,14 +517,16 @@ def plot_progress_chart(tsv_path: Path, out_png: Path, metric: str = "p99_latenc
 
     ax.scatter(xs_all, ys_all, s=28, color="#cbd5e1", alpha=0.8, label="Evaluated candidates", zorder=2)
     if xs_keep:
-        ax.step(xs_keep, ys_keep, where="post", linewidth=2.4, color="#16a34a", label="Best frontier", zorder=3)
+        step_x = [*xs_keep, max(xs_all)] if max(xs_all) > xs_keep[-1] else xs_keep
+        step_y = [*ys_keep, ys_keep[-1]] if max(xs_all) > xs_keep[-1] else ys_keep
+        ax.step(step_x, step_y, where="post", linewidth=2.4, color="#16a34a", label="Best frontier", zorder=3)
         ax.scatter(xs_keep, ys_keep, s=68, color="#16a34a", edgecolors="white", linewidths=1.2, zorder=4)
         for idx, (xk, yk, tk, ck) in enumerate(zip(xs_keep, ys_keep, titles_keep, cats_keep)):
             if idx == 0 or idx == len(xs_keep) - 1 or len(xs_keep) <= 7:
                 tag = "Kernel: " if ck == "triton_kernels" else ""
                 offset_y = 10 if idx % 2 == 0 else -14
                 ax.annotate(
-                    f"{tag}{tk[:36]}",
+                    f"{tag}{tk}",
                     (xk, yk),
                     textcoords="offset points",
                     xytext=(4, offset_y),

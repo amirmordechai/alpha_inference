@@ -1,0 +1,587 @@
+{
+  "validated_at_utc": "2026-11-03T23:28:00.659788+00:00",
+  "trace_path": "examples/email_triage/tuesday_peak_30m.jsonl",
+  "num_requests": 6148,
+  "replay_duration_min": 29.97,
+  "metric": "p99_latency",
+  "metric_label": "P99 Latency",
+  "baseline_source": "candidate.py",
+  "best_source": "examples/email_triage/results/best_candidate.py",
+  "best_hypothesis": "Using a moderate micro-batching limit (seqs=24, tokens=4096) absorbs arrival bursts to prevent host-side queueing without causing mega-batch slowdowns. Combining this with a dense CUDA graph capture ladder up to 2048 tokens bypasses CPU launch overhead. We also lower OMP_NUM_THREADS to 4 to reduce CPU core scheduling contention.",
+  "baseline": {
+    "p99_latency_ms": 1146.89,
+    "p50_latency_ms": 338.1,
+    "mean_latency_ms": 414.56,
+    "ttft_p99_ms": 1146.89,
+    "trace_rps": 3.42,
+    "throughput_rps": 45.43,
+    "completed_requests": 6148,
+    "failed_requests": 0,
+    "wall_sec": 1798.1,
+    "time_buckets": [
+      {
+        "bucket_idx": 0.0,
+        "start_sec": 0.0,
+        "requests": 291.0,
+        "rps": 4.85,
+        "p50_ms": 533.0,
+        "p99_ms": 1205.11,
+        "ttft_p99_ms": 1205.11
+      },
+      {
+        "bucket_idx": 1.0,
+        "start_sec": 60.0,
+        "requests": 305.0,
+        "rps": 5.08,
+        "p50_ms": 682.72,
+        "p99_ms": 1307.1,
+        "ttft_p99_ms": 1307.1
+      },
+      {
+        "bucket_idx": 2.0,
+        "start_sec": 120.0,
+        "requests": 296.0,
+        "rps": 4.93,
+        "p50_ms": 515.41,
+        "p99_ms": 846.68,
+        "ttft_p99_ms": 846.68
+      },
+      {
+        "bucket_idx": 3.0,
+        "start_sec": 180.0,
+        "requests": 166.0,
+        "rps": 2.77,
+        "p50_ms": 495.3,
+        "p99_ms": 843.92,
+        "ttft_p99_ms": 843.92
+      },
+      {
+        "bucket_idx": 4.0,
+        "start_sec": 240.0,
+        "requests": 284.0,
+        "rps": 4.73,
+        "p50_ms": 509.82,
+        "p99_ms": 1018.51,
+        "ttft_p99_ms": 1018.51
+      },
+      {
+        "bucket_idx": 5.0,
+        "start_sec": 300.0,
+        "requests": 283.0,
+        "rps": 4.72,
+        "p50_ms": 671.02,
+        "p99_ms": 970.5,
+        "ttft_p99_ms": 970.5
+      },
+      {
+        "bucket_idx": 6.0,
+        "start_sec": 360.0,
+        "requests": 258.0,
+        "rps": 4.3,
+        "p50_ms": 414.28,
+        "p99_ms": 745.77,
+        "ttft_p99_ms": 745.77
+      },
+      {
+        "bucket_idx": 7.0,
+        "start_sec": 420.0,
+        "requests": 141.0,
+        "rps": 2.35,
+        "p50_ms": 344.13,
+        "p99_ms": 662.58,
+        "ttft_p99_ms": 662.58
+      },
+      {
+        "bucket_idx": 8.0,
+        "start_sec": 480.0,
+        "requests": 214.0,
+        "rps": 3.57,
+        "p50_ms": 289.09,
+        "p99_ms": 623.93,
+        "ttft_p99_ms": 623.93
+      },
+      {
+        "bucket_idx": 9.0,
+        "start_sec": 540.0,
+        "requests": 267.0,
+        "rps": 4.45,
+        "p50_ms": 376.17,
+        "p99_ms": 639.98,
+        "ttft_p99_ms": 639.98
+      },
+      {
+        "bucket_idx": 10.0,
+        "start_sec": 600.0,
+        "requests": 208.0,
+        "rps": 3.47,
+        "p50_ms": 355.58,
+        "p99_ms": 746.97,
+        "ttft_p99_ms": 746.97
+      },
+      {
+        "bucket_idx": 11.0,
+        "start_sec": 660.0,
+        "requests": 153.0,
+        "rps": 2.55,
+        "p50_ms": 349.97,
+        "p99_ms": 766.51,
+        "ttft_p99_ms": 766.51
+      },
+      {
+        "bucket_idx": 12.0,
+        "start_sec": 720.0,
+        "requests": 239.0,
+        "rps": 3.98,
+        "p50_ms": 350.96,
+        "p99_ms": 673.26,
+        "ttft_p99_ms": 673.26
+      },
+      {
+        "bucket_idx": 13.0,
+        "start_sec": 780.0,
+        "requests": 229.0,
+        "rps": 3.82,
+        "p50_ms": 362.24,
+        "p99_ms": 858.27,
+        "ttft_p99_ms": 858.27
+      },
+      {
+        "bucket_idx": 14.0,
+        "start_sec": 840.0,
+        "requests": 131.0,
+        "rps": 2.18,
+        "p50_ms": 279.87,
+        "p99_ms": 477.72,
+        "ttft_p99_ms": 477.72
+      },
+      {
+        "bucket_idx": 15.0,
+        "start_sec": 900.0,
+        "requests": 213.0,
+        "rps": 3.55,
+        "p50_ms": 297.2,
+        "p99_ms": 478.31,
+        "ttft_p99_ms": 478.31
+      },
+      {
+        "bucket_idx": 16.0,
+        "start_sec": 960.0,
+        "requests": 221.0,
+        "rps": 3.68,
+        "p50_ms": 340.73,
+        "p99_ms": 688.87,
+        "ttft_p99_ms": 688.87
+      },
+      {
+        "bucket_idx": 17.0,
+        "start_sec": 1020.0,
+        "requests": 233.0,
+        "rps": 3.88,
+        "p50_ms": 369.43,
+        "p99_ms": 763.82,
+        "ttft_p99_ms": 763.82
+      },
+      {
+        "bucket_idx": 18.0,
+        "start_sec": 1080.0,
+        "requests": 154.0,
+        "rps": 2.57,
+        "p50_ms": 363.65,
+        "p99_ms": 667.78,
+        "ttft_p99_ms": 667.78
+      },
+      {
+        "bucket_idx": 19.0,
+        "start_sec": 1140.0,
+        "requests": 220.0,
+        "rps": 3.67,
+        "p50_ms": 292.21,
+        "p99_ms": 616.2,
+        "ttft_p99_ms": 616.2
+      },
+      {
+        "bucket_idx": 20.0,
+        "start_sec": 1200.0,
+        "requests": 203.0,
+        "rps": 3.38,
+        "p50_ms": 311.96,
+        "p99_ms": 625.75,
+        "ttft_p99_ms": 625.75
+      },
+      {
+        "bucket_idx": 21.0,
+        "start_sec": 1260.0,
+        "requests": 183.0,
+        "rps": 3.05,
+        "p50_ms": 286.22,
+        "p99_ms": 471.24,
+        "ttft_p99_ms": 471.24
+      },
+      {
+        "bucket_idx": 22.0,
+        "start_sec": 1320.0,
+        "requests": 127.0,
+        "rps": 2.12,
+        "p50_ms": 270.77,
+        "p99_ms": 558.52,
+        "ttft_p99_ms": 558.52
+      },
+      {
+        "bucket_idx": 23.0,
+        "start_sec": 1380.0,
+        "requests": 220.0,
+        "rps": 3.67,
+        "p50_ms": 315.22,
+        "p99_ms": 811.93,
+        "ttft_p99_ms": 811.93
+      },
+      {
+        "bucket_idx": 24.0,
+        "start_sec": 1440.0,
+        "requests": 160.0,
+        "rps": 2.67,
+        "p50_ms": 283.22,
+        "p99_ms": 504.64,
+        "ttft_p99_ms": 504.64
+      },
+      {
+        "bucket_idx": 25.0,
+        "start_sec": 1500.0,
+        "requests": 195.0,
+        "rps": 3.25,
+        "p50_ms": 342.83,
+        "p99_ms": 629.04,
+        "ttft_p99_ms": 629.04
+      },
+      {
+        "bucket_idx": 26.0,
+        "start_sec": 1560.0,
+        "requests": 183.0,
+        "rps": 3.05,
+        "p50_ms": 320.92,
+        "p99_ms": 655.7,
+        "ttft_p99_ms": 655.7
+      },
+      {
+        "bucket_idx": 27.0,
+        "start_sec": 1620.0,
+        "requests": 107.0,
+        "rps": 1.78,
+        "p50_ms": 242.33,
+        "p99_ms": 317.96,
+        "ttft_p99_ms": 317.96
+      },
+      {
+        "bucket_idx": 28.0,
+        "start_sec": 1680.0,
+        "requests": 148.0,
+        "rps": 2.47,
+        "p50_ms": 276.33,
+        "p99_ms": 426.96,
+        "ttft_p99_ms": 426.96
+      },
+      {
+        "bucket_idx": 29.0,
+        "start_sec": 1740.0,
+        "requests": 116.0,
+        "rps": 2.01,
+        "p50_ms": 278.4,
+        "p99_ms": 530.76,
+        "ttft_p99_ms": 530.76
+      }
+    ]
+  },
+  "best_evolved": {
+    "p99_latency_ms": 1115.43,
+    "p50_latency_ms": 343.5,
+    "mean_latency_ms": 409.8,
+    "ttft_p99_ms": 1115.43,
+    "trace_rps": 3.42,
+    "throughput_rps": 44.81,
+    "completed_requests": 6148,
+    "failed_requests": 0,
+    "wall_sec": 1798.06,
+    "time_buckets": [
+      {
+        "bucket_idx": 0.0,
+        "start_sec": 0.0,
+        "requests": 291.0,
+        "rps": 4.85,
+        "p50_ms": 510.36,
+        "p99_ms": 1245.6,
+        "ttft_p99_ms": 1245.6
+      },
+      {
+        "bucket_idx": 1.0,
+        "start_sec": 60.0,
+        "requests": 305.0,
+        "rps": 5.08,
+        "p50_ms": 613.27,
+        "p99_ms": 1244.18,
+        "ttft_p99_ms": 1244.18
+      },
+      {
+        "bucket_idx": 2.0,
+        "start_sec": 120.0,
+        "requests": 296.0,
+        "rps": 4.93,
+        "p50_ms": 489.97,
+        "p99_ms": 778.45,
+        "ttft_p99_ms": 778.45
+      },
+      {
+        "bucket_idx": 3.0,
+        "start_sec": 180.0,
+        "requests": 166.0,
+        "rps": 2.77,
+        "p50_ms": 423.49,
+        "p99_ms": 762.68,
+        "ttft_p99_ms": 762.68
+      },
+      {
+        "bucket_idx": 4.0,
+        "start_sec": 240.0,
+        "requests": 284.0,
+        "rps": 4.73,
+        "p50_ms": 492.22,
+        "p99_ms": 931.3,
+        "ttft_p99_ms": 931.3
+      },
+      {
+        "bucket_idx": 5.0,
+        "start_sec": 300.0,
+        "requests": 283.0,
+        "rps": 4.72,
+        "p50_ms": 666.39,
+        "p99_ms": 891.92,
+        "ttft_p99_ms": 891.92
+      },
+      {
+        "bucket_idx": 6.0,
+        "start_sec": 360.0,
+        "requests": 258.0,
+        "rps": 4.3,
+        "p50_ms": 411.15,
+        "p99_ms": 694.02,
+        "ttft_p99_ms": 694.02
+      },
+      {
+        "bucket_idx": 7.0,
+        "start_sec": 420.0,
+        "requests": 141.0,
+        "rps": 2.35,
+        "p50_ms": 328.14,
+        "p99_ms": 641.33,
+        "ttft_p99_ms": 641.33
+      },
+      {
+        "bucket_idx": 8.0,
+        "start_sec": 480.0,
+        "requests": 214.0,
+        "rps": 3.57,
+        "p50_ms": 296.98,
+        "p99_ms": 606.22,
+        "ttft_p99_ms": 606.22
+      },
+      {
+        "bucket_idx": 9.0,
+        "start_sec": 540.0,
+        "requests": 267.0,
+        "rps": 4.45,
+        "p50_ms": 364.11,
+        "p99_ms": 632.11,
+        "ttft_p99_ms": 632.11
+      },
+      {
+        "bucket_idx": 10.0,
+        "start_sec": 600.0,
+        "requests": 208.0,
+        "rps": 3.47,
+        "p50_ms": 381.62,
+        "p99_ms": 699.09,
+        "ttft_p99_ms": 699.09
+      },
+      {
+        "bucket_idx": 11.0,
+        "start_sec": 660.0,
+        "requests": 153.0,
+        "rps": 2.55,
+        "p50_ms": 375.22,
+        "p99_ms": 726.2,
+        "ttft_p99_ms": 726.2
+      },
+      {
+        "bucket_idx": 12.0,
+        "start_sec": 720.0,
+        "requests": 239.0,
+        "rps": 3.98,
+        "p50_ms": 348.07,
+        "p99_ms": 685.96,
+        "ttft_p99_ms": 685.96
+      },
+      {
+        "bucket_idx": 13.0,
+        "start_sec": 780.0,
+        "requests": 229.0,
+        "rps": 3.82,
+        "p50_ms": 367.38,
+        "p99_ms": 865.01,
+        "ttft_p99_ms": 865.01
+      },
+      {
+        "bucket_idx": 14.0,
+        "start_sec": 840.0,
+        "requests": 131.0,
+        "rps": 2.18,
+        "p50_ms": 280.32,
+        "p99_ms": 555.07,
+        "ttft_p99_ms": 555.07
+      },
+      {
+        "bucket_idx": 15.0,
+        "start_sec": 900.0,
+        "requests": 213.0,
+        "rps": 3.55,
+        "p50_ms": 300.8,
+        "p99_ms": 491.81,
+        "ttft_p99_ms": 491.81
+      },
+      {
+        "bucket_idx": 16.0,
+        "start_sec": 960.0,
+        "requests": 221.0,
+        "rps": 3.68,
+        "p50_ms": 330.2,
+        "p99_ms": 669.12,
+        "ttft_p99_ms": 669.12
+      },
+      {
+        "bucket_idx": 17.0,
+        "start_sec": 1020.0,
+        "requests": 233.0,
+        "rps": 3.88,
+        "p50_ms": 376.87,
+        "p99_ms": 772.13,
+        "ttft_p99_ms": 772.13
+      },
+      {
+        "bucket_idx": 18.0,
+        "start_sec": 1080.0,
+        "requests": 154.0,
+        "rps": 2.57,
+        "p50_ms": 379.76,
+        "p99_ms": 620.81,
+        "ttft_p99_ms": 620.81
+      },
+      {
+        "bucket_idx": 19.0,
+        "start_sec": 1140.0,
+        "requests": 220.0,
+        "rps": 3.67,
+        "p50_ms": 296.2,
+        "p99_ms": 592.13,
+        "ttft_p99_ms": 592.13
+      },
+      {
+        "bucket_idx": 20.0,
+        "start_sec": 1200.0,
+        "requests": 203.0,
+        "rps": 3.38,
+        "p50_ms": 302.59,
+        "p99_ms": 592.59,
+        "ttft_p99_ms": 592.59
+      },
+      {
+        "bucket_idx": 21.0,
+        "start_sec": 1260.0,
+        "requests": 183.0,
+        "rps": 3.05,
+        "p50_ms": 297.98,
+        "p99_ms": 547.02,
+        "ttft_p99_ms": 547.02
+      },
+      {
+        "bucket_idx": 22.0,
+        "start_sec": 1320.0,
+        "requests": 127.0,
+        "rps": 2.12,
+        "p50_ms": 270.74,
+        "p99_ms": 580.56,
+        "ttft_p99_ms": 580.56
+      },
+      {
+        "bucket_idx": 23.0,
+        "start_sec": 1380.0,
+        "requests": 220.0,
+        "rps": 3.67,
+        "p50_ms": 315.64,
+        "p99_ms": 782.41,
+        "ttft_p99_ms": 782.41
+      },
+      {
+        "bucket_idx": 24.0,
+        "start_sec": 1440.0,
+        "requests": 160.0,
+        "rps": 2.67,
+        "p50_ms": 293.49,
+        "p99_ms": 509.04,
+        "ttft_p99_ms": 509.04
+      },
+      {
+        "bucket_idx": 25.0,
+        "start_sec": 1500.0,
+        "requests": 195.0,
+        "rps": 3.25,
+        "p50_ms": 344.57,
+        "p99_ms": 623.45,
+        "ttft_p99_ms": 623.45
+      },
+      {
+        "bucket_idx": 26.0,
+        "start_sec": 1560.0,
+        "requests": 183.0,
+        "rps": 3.05,
+        "p50_ms": 330.89,
+        "p99_ms": 648.87,
+        "ttft_p99_ms": 648.87
+      },
+      {
+        "bucket_idx": 27.0,
+        "start_sec": 1620.0,
+        "requests": 107.0,
+        "rps": 1.78,
+        "p50_ms": 250.99,
+        "p99_ms": 352.72,
+        "ttft_p99_ms": 352.72
+      },
+      {
+        "bucket_idx": 28.0,
+        "start_sec": 1680.0,
+        "requests": 148.0,
+        "rps": 2.47,
+        "p50_ms": 285.25,
+        "p99_ms": 452.67,
+        "ttft_p99_ms": 452.67
+      },
+      {
+        "bucket_idx": 29.0,
+        "start_sec": 1740.0,
+        "requests": 116.0,
+        "rps": 2.01,
+        "p50_ms": 277.29,
+        "p99_ms": 635.08,
+        "ttft_p99_ms": 635.08
+      }
+    ]
+  },
+  "p99_reduction_pct": -2.74,
+  "throughput_gain_pct": -1.36,
+  "unseen_equivalence": {
+    "passed": false,
+    "num_checked": 6148,
+    "mean_kl_divergence": 0.06673,
+    "exact_slot_match_pct": 94.0,
+    "confident_slot_match_pct": 95.58,
+    "reason": "Catastrophic confident jumps 0.60% > 0.50% (req-023427.safe jumped 3 points (got 5 vs confident baseline 2))"
+  }
+}
