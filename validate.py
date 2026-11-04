@@ -37,7 +37,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 from dotenv import load_dotenv
 
-import deploy
 from alpha_inference.adapters import (
     ParsedChatResponse,
     ParsedJevResponse,
@@ -54,7 +53,20 @@ from alpha_inference.evaluator import (
     parse_timestamp_sec,
     replay_trace_realtime,
 )
-from alpha_inference.reporting import extract_flag_value, inspect_vertex_endpoint
+from alpha_inference.reporting import (
+    ACCELERATOR_COUNT,
+    ACCELERATOR_TYPE,
+    MACHINE_TYPE,
+    extract_flag_value,
+)
+from alpha_inference.vertex import (
+    DEFAULT_UPSTREAM_VLLM_IMAGE,
+    deploy_vertex_worker_or_endpoint,
+    ensure_ar_image_mirrored,
+    inspect_vertex_endpoint,
+    load_candidate_file,
+    teardown_endpoint,
+)
 
 logger = logging.getLogger("alpha_inference.validate")
 
@@ -83,6 +95,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--best-url", default="", help="Existing Best Evolved endpoint URL")
     p.add_argument("--deploy-vertex", action="store_true", help="Deploy standalone Baseline & Best Vertex GPU Endpoints")
     p.add_argument("--auto-teardown", action="store_true", help="Delete provisioned Vertex GPU Endpoints on exit")
+    p.add_argument("--machine-type", default=MACHINE_TYPE, help="Vertex machine type for --deploy-vertex")
+    p.add_argument("--accelerator-type", default=ACCELERATOR_TYPE, help="Vertex GPU accelerator for --deploy-vertex")
+    p.add_argument("--accelerator-count", type=int, default=ACCELERATOR_COUNT, help="GPU count / TP size")
+    p.add_argument("--vllm-image", default=DEFAULT_UPSTREAM_VLLM_IMAGE, help="vLLM serving container image")
     p.add_argument("--skip-mirror", action="store_true", help="Skip Artifact Registry container mirror check")
     p.add_argument("--no-gcp-auth", action="store_true", help="Disable GCP Bearer auth on endpoint HTTP requests")
 
@@ -324,8 +340,8 @@ async def run_validation(args: argparse.Namespace) -> dict[str, Any]:
         if args.best_config.strip()
         else (default_best_path if default_best_path.exists() else base_cfg_path)
     )
-    base_cand = deploy.load_candidate_file(base_cfg_path)
-    best_cand = deploy.load_candidate_file(best_cfg_path)
+    base_cand = load_candidate_file(base_cfg_path)
+    best_cand = load_candidate_file(best_cfg_path)
 
     canon_metric = normalize_metric(args.metric)
     trace_path = Path(args.trace)
@@ -360,34 +376,39 @@ async def run_validation(args: argparse.Namespace) -> dict[str, Any]:
         if args.deploy_vertex:
             if not args.project_id:
                 raise RuntimeError("Set GCP_PROJECT_ID in .env or pass --project-id.")
+            eff_image = args.vllm_image
             if not args.skip_mirror:
-                deploy.ensure_ar_image_mirrored(args.project_id, args.region, args.ar_repo)
+                eff_image = ensure_ar_image_mirrored(args.project_id, args.region, args.ar_repo, upstream_image=eff_image)
             ts_tag = int(time.time()) % 100000
             logger.info("Deploying standalone Ground-Zero Baseline & AlphaEvolve Best Vertex GPU Endpoints...")
             base_ep, best_ep = await asyncio.gather(
                 asyncio.to_thread(
-                    deploy.deploy_candidate_to_vertex,
+                    deploy_vertex_worker_or_endpoint,
                     base_cand,
                     args.project_id,
                     args.region,
                     args.ar_repo,
                     f"ae-val-base-{ts_tag}",
-                    str(base_cfg_path),
-                    "",
-                    100,
-                    True,
+                    source_path=str(base_cfg_path),
+                    skip_mirror=True,
+                    upstream_image=eff_image,
+                    machine_type=args.machine_type,
+                    accelerator_type=args.accelerator_type,
+                    accelerator_count=args.accelerator_count,
                 ),
                 asyncio.to_thread(
-                    deploy.deploy_candidate_to_vertex,
+                    deploy_vertex_worker_or_endpoint,
                     best_cand,
                     args.project_id,
                     args.region,
                     args.ar_repo,
                     f"ae-val-best-{ts_tag}",
-                    str(best_cfg_path),
-                    "",
-                    100,
-                    True,
+                    source_path=str(best_cfg_path),
+                    skip_mirror=True,
+                    upstream_image=eff_image,
+                    machine_type=args.machine_type,
+                    accelerator_type=args.accelerator_type,
+                    accelerator_count=args.accelerator_count,
                 ),
             )
             provisioned.extend([base_ep["endpoint_id"], best_ep["endpoint_id"]])
@@ -559,7 +580,7 @@ async def run_validation(args: argparse.Namespace) -> dict[str, Any]:
             logger.info("Tearing down %d validation Vertex GPU Endpoint(s)...", len(provisioned))
             await asyncio.gather(
                 *(
-                    asyncio.to_thread(deploy.teardown_endpoint, args.project_id, args.region, ep_id)
+                    asyncio.to_thread(teardown_endpoint, args.project_id, args.region, ep_id)
                     for ep_id in provisioned
                 ),
                 return_exceptions=True,

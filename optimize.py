@@ -57,21 +57,29 @@ from alpha_inference.evaluator import (
     to_alpha_evolve_score,
 )
 from alpha_inference.reporting import (
+    ACCELERATOR_COUNT,
     ACCELERATOR_TYPE,
+    MACHINE_TYPE,
     CandidateSpec,
     append_results_tsv,
     build_seed_program_source,
     capture_gpu_profile,
     deploy_search_vertex_endpoint,
     extract_flag_value,
-    inspect_vertex_endpoint,
     parse_candidate_code,
     plot_progress_chart,
     reload_endpoint,
     validate_candidate_spec,
     write_articulated_summary,
 )
-from deploy import ensure_ar_image_mirrored, teardown_endpoint
+from alpha_inference.vertex import (
+    DEFAULT_UPSTREAM_VLLM_IMAGE,
+    build_gcloud_rollout_command,
+    ensure_ar_image_mirrored,
+    format_candidate_diff,
+    inspect_vertex_endpoint,
+    teardown_endpoint,
+)
 
 logger = logging.getLogger("alpha_inference")
 
@@ -139,13 +147,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--hourly-gpu-usd", type=float, default=2.65, help="Per-GPU hourly rate in USD for budget tracking")
     p.add_argument("--confirm-wins", action="store_true", help="Re-verify new record candidates before promoting")
 
-    # Endpoint / Vertex AI settings
-    p.add_argument("--vertex-endpoint-id", default="", help="Live Vertex AI Endpoint ID(s), comma-separated")
-    p.add_argument("--endpoint-json", default="", help="JSON file emitted by `deploy.py --out-json`")
+    # Endpoint / Vertex AI / GPU hardware settings (works with any GPU, model, and image)
+    p.add_argument("--vertex-endpoint-id", default="", help="Live Vertex AI Endpoint ID(s) created via `gcloud ai` or Model Garden")
     p.add_argument("--endpoint", "--endpoint-url", dest="endpoint", default="", help="Existing reload_proxy URL(s), comma-separated")
     p.add_argument("--admin-token", default="", help="Admin token(s) for reload_proxy hot-swap")
-    p.add_argument("--deploy-vertex", action="store_true", help="Provision Dedicated Vertex AI GPU Endpoint(s)")
-    p.add_argument("--auto-teardown", action="store_true", help="Delete provisioned Vertex GPU Endpoint(s) on exit")
+    p.add_argument("--deploy-vertex", action="store_true", help="Provision ephemeral Vertex AI GPU worker(s) for search")
+    p.add_argument("--auto-teardown", action="store_true", help="Delete provisioned Vertex GPU worker(s) on exit")
+    p.add_argument("--machine-type", default="", help=f"Override Vertex machine type (default: inherit from endpoint or {MACHINE_TYPE})")
+    p.add_argument("--accelerator-type", default="", help=f"Override GPU accelerator (default: inherit from endpoint or {ACCELERATOR_TYPE})")
+    p.add_argument("--accelerator-count", type=int, default=0, help=f"Override GPU count / TP size (default: inherit or {ACCELERATOR_COUNT})")
+    p.add_argument("--vllm-image", default="", help=f"Override vLLM container image (default: inherit or {DEFAULT_UPSTREAM_VLLM_IMAGE})")
     p.add_argument("--skip-mirror", action="store_true", help="Skip Artifact Registry container mirror check")
     p.add_argument("--no-gcp-auth", action="store_true", help="Disable GCP Bearer auth on endpoint HTTP requests")
 
@@ -161,6 +172,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--model-2-weight", type=float, default=float(os.getenv("AE_MODEL_2_WEIGHT", "0.45")))
 
     p.add_argument("--out-dir", default="examples/email_triage/results", help="Output directory for articulated results")
+    p.add_argument("--diff", action="store_true", help="Print unified diff between candidate.py and <out-dir>/best_candidate.py")
     p.add_argument("--dry-run", action="store_true", help="Validate trace, seed candidate, and budget with $0 spend")
     return p
 
@@ -223,15 +235,16 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
         return round(hrs * args.hourly_gpu_usd * n_gpus + ae_api_spend_est, 4)
 
     try:
-        # Optional: inspect live --vertex-endpoint-id(s) or --endpoint-json
+        # Optional: inspect live --vertex-endpoint-id(s) created via standard `gcloud ai` or Model Garden
         explicit_toks = [t.strip() for t in args.admin_token.split(",") if t.strip()]
-        if args.endpoint_json:
-            ep_obj = json.loads(Path(args.endpoint_json).read_text(encoding="utf-8"))
-            if ep_obj.get("chat_completions_url"):
-                worker_pool.append((len(worker_pool), str(ep_obj["chat_completions_url"]), str(ep_obj.get("admin_token", ""))))
-
         ep_ids = [eid.strip() for eid in args.vertex_endpoint_id.split(",") if eid.strip()]
         inspected_eps = [inspect_vertex_endpoint(args.project_id, args.region, eid) for eid in ep_ids]
+
+        eff_machine = args.machine_type.strip() or (inspected_eps[0]["machine_type"] if inspected_eps and inspected_eps[0]["machine_type"] else MACHINE_TYPE)
+        eff_accel = args.accelerator_type.strip() or (inspected_eps[0]["accelerator_type"] if inspected_eps and inspected_eps[0]["accelerator_type"] else ACCELERATOR_TYPE)
+        eff_accel_count = int(args.accelerator_count) if int(args.accelerator_count) > 0 else (int(inspected_eps[0]["accelerator_count"]) if inspected_eps and inspected_eps[0]["accelerator_count"] else ACCELERATOR_COUNT)
+        eff_image = args.vllm_image.strip() or (inspected_eps[0]["image_uri"] if inspected_eps and inspected_eps[0]["image_uri"] else DEFAULT_UPSTREAM_VLLM_IMAGE)
+
         if inspected_eps and not args.model.strip() and inspected_eps[0].get("vllm_args"):
             live_args = inspected_eps[0]["vllm_args"]
             if live_args and live_args[0] != baseline_cand.vllm_args[0]:
@@ -241,11 +254,23 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
                 resolved_mode = detect_task_mode(trace_rows, requested_mode=args.task_mode, model_name=baseline_cand.vllm_args[0])
                 (out_dir / "candidates" / "cand_000_baseline.py").write_text(seed_source, encoding="utf-8")
 
+        # Standard `gcloud ai` endpoints don't embed reload_proxy; clone onto ephemeral hot-reload search workers automatically
+        clone_standard_endpoint = bool(inspected_eps) and not any(ep["has_hot_reload"] for ep in inspected_eps) and not explicit_toks
+        should_provision_workers = args.deploy_vertex or clone_standard_endpoint
+        auto_teardown_workers = args.auto_teardown or clone_standard_endpoint
+
         # 1. Provision or attach GPU worker pool
-        if args.deploy_vertex:
-            logger.info("Provisioning %d parallel Vertex AI Dedicated GPU Endpoint(s) in %s...", num_workers, args.region)
+        if should_provision_workers:
+            logger.info(
+                "Provisioning %d hot-reload Vertex AI GPU worker(s) (%s x%d on %s) in %s...",
+                num_workers,
+                eff_accel,
+                eff_accel_count,
+                eff_machine,
+                args.region,
+            )
             if not args.skip_mirror:
-                ensure_ar_image_mirrored(args.project_id, args.region, args.ar_repo)
+                eff_image = ensure_ar_image_mirrored(args.project_id, args.region, args.ar_repo, upstream_image=eff_image)
             ep_results = await asyncio.gather(
                 *(
                     asyncio.to_thread(
@@ -256,6 +281,10 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
                         baseline_cand,
                         f"ae-inf-w{idx}",
                         True,
+                        upstream_image=eff_image,
+                        machine_type=eff_machine,
+                        accelerator_type=eff_accel,
+                        accelerator_count=eff_accel_count,
                     )
                     for idx in range(num_workers)
                 ),
@@ -271,19 +300,14 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
                     ep_meta.append({
                         "worker_idx": len(worker_pool) - 1,
                         "deploy_wall_sec": item.get("deploy_wall_sec", 0.0),
-                        "machine_type": "g4-standard-48",
-                        "accelerator_type": ACCELERATOR_TYPE,
+                        "machine_type": eff_machine,
+                        "accelerator_type": eff_accel,
+                        "accelerator_count": eff_accel_count,
                     })
             (out_dir / "search_endpoints.json").write_text(json.dumps(ep_meta, indent=2) + "\n", encoding="utf-8")
         else:
             for idx, ep_info in enumerate(inspected_eps):
                 tok = explicit_toks[idx] if idx < len(explicit_toks) else (explicit_toks[0] if explicit_toks else ep_info["admin_token"])
-                if not tok:
-                    raise RuntimeError(
-                        f"Vertex Endpoint {ep_info['endpoint_id']} does not have hot-reload enabled yet. "
-                        f"Either pass --deploy-vertex to spin up temporary search workers, or enable hot-reload on it via: "
-                        f"python deploy.py --endpoint-id {ep_info['endpoint_id']} --hot-reload --deploy"
-                    )
                 worker_pool.append((len(worker_pool), ep_info["chat_completions_url"], tok))
 
             urls = [u.strip() for u in args.endpoint.split(",") if u.strip()]
@@ -295,7 +319,7 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
                     worker_pool.append((len(worker_pool), u, t))
 
         if not worker_pool:
-            raise RuntimeError("No active GPU endpoints available. Pass --vertex-endpoint-id, --endpoint-json, --endpoint, or --deploy-vertex.")
+            raise RuntimeError("No active GPU endpoints available. Pass --vertex-endpoint-id, --endpoint, or --deploy-vertex.")
 
         use_gcp_auth = (not args.no_gcp_auth) and (
             args.deploy_vertex or "prediction.vertexai" in worker_pool[0][1] or ":rawPredict" in worker_pool[0][1]
@@ -642,7 +666,7 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
             f"AlphaEvolve maximizes `fitness_score` = {score_expr}.\n"
             f"- **Ground-Zero Baseline (`#0`):** P99=`{base_res.p99_latency_ms:.2f} ms`, "
             f"P50=`{base_res.p50_latency_ms:.2f} ms`, Peak Throughput=`{base_res.throughput_rps:.2f} req/s`.\n"
-            f"- **Hardware:** NVIDIA RTX PRO 6000 (96GB GDDR7, Blackwell sm_120) serving `{baseline_cand.vllm_args[0]}`.\n"
+            f"- **Hardware:** `{eff_accel}` (`x{eff_accel_count}` on `{eff_machine}`) serving `{baseline_cand.vllm_args[0]}`.\n"
             f"- **Live Ground-Zero Top GPU CUDA Kernels:**\n```json\n{prof_summary}\n```\n"
         )
 
@@ -713,7 +737,19 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
             watchdog_task.cancel()
             await asyncio.gather(watchdog_task, return_exceptions=True)
 
-        # 5. Finalize articulated outputs
+        # 5. Finalize articulated outputs + native `gcloud ai` rollout script
+        rollout_sh = build_gcloud_rollout_command(
+            best_cand,
+            project_id=args.project_id or "${GCP_PROJECT_ID}",
+            region=args.region or "${GCP_REGION:-us-central1}",
+            endpoint_id=ep_ids[0] if ep_ids else "${VERTEX_ENDPOINT_ID}",
+            image_uri=eff_image,
+            machine_type=eff_machine,
+            accelerator_type=eff_accel,
+            accelerator_count=eff_accel_count,
+        )
+        (out_dir / "gcloud_rollout.sh").write_text("#!/usr/bin/env bash\nset -euo pipefail\n\n" + rollout_sh, encoding="utf-8")
+
         write_articulated_summary(
             out_dir,
             metric=canon_metric,
@@ -749,8 +785,8 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
         (out_dir / "optimization_summary.json").write_text(json.dumps(run_meta, indent=2) + "\n", encoding="utf-8")
         return run_meta
     finally:
-        if provisioned_endpoint_ids and args.auto_teardown:
-            logger.info("Tearing down %d provisioned Vertex GPU Endpoint(s)...", len(provisioned_endpoint_ids))
+        if provisioned_endpoint_ids and auto_teardown_workers:
+            logger.info("Tearing down %d provisioned Vertex GPU worker(s)...", len(provisioned_endpoint_ids))
             await asyncio.gather(
                 *(
                     asyncio.to_thread(teardown_endpoint, args.project_id, args.region, ep_id)
@@ -768,6 +804,10 @@ def main() -> None:
     nest_asyncio.apply()
     parser = build_parser()
     args = parser.parse_args()
+    if args.diff:
+        best_file = Path(args.out_dir) / "best_candidate.py"
+        print(format_candidate_diff("candidate.py", best_file), end="")
+        return
     res = asyncio.run(run_optimization(args))
     print(json.dumps(res, indent=2))
 

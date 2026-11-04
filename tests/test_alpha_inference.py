@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
+import pytest
 from aiohttp import web
 
 from alpha_inference.adapters import (
@@ -29,6 +32,7 @@ from alpha_inference.reporting import (
     parse_candidate_code,
     validate_candidate_spec,
 )
+from alpha_inference.vertex import build_gcloud_rollout_command, teardown_endpoint
 
 
 def test_seed_candidate_has_official_evolve_block() -> None:
@@ -184,16 +188,56 @@ def test_realtime_replay_and_kl_equivalence_against_mock_server() -> None:
     asyncio.run(_run())
 
 
-def test_cli_dry_runs_succeed() -> None:
+def test_cli_dry_runs_and_hardware_agnostic_gcloud_rollout() -> None:
     for cmd in (
-        [sys.executable, "optimize.py", "--vertex-endpoint-id", "1234567890", "--dry-run"],
-        [sys.executable, "validate.py", "--baseline-endpoint-id", "111", "--best-endpoint-id", "222", "--dry-run"],
-        [sys.executable, "deploy.py", "--config", "candidate.py", "--dry-run"],
-        [sys.executable, "deploy.py", "--model", "google/gemma-4-26B-A4B-it", "--hot-reload", "--dry-run"],
+        [
+            sys.executable,
+            "optimize.py",
+            "--vertex-endpoint-id",
+            "1234567890",
+            "--model",
+            "google/gemma-4-26B-A4B-it",
+            "--machine-type",
+            "g2-standard-8",
+            "--accelerator-type",
+            "NVIDIA_L4",
+            "--trace",
+            "examples/custom_openai_chat/sample_trace.jsonl",
+            "--dry-run",
+        ],
+        [
+            sys.executable,
+            "validate.py",
+            "--baseline-endpoint-id",
+            "111",
+            "--best-endpoint-id",
+            "222",
+            "--trace",
+            "examples/custom_openai_chat/sample_trace.jsonl",
+            "--dry-run",
+        ],
     ):
         proc = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True, check=True)
         payload = json.loads(proc.stdout)
         assert isinstance(payload, dict)
+
+    diff_proc = subprocess.run([sys.executable, "optimize.py", "--diff"], cwd=REPO_ROOT, capture_output=True, text=True, check=True)
+    assert "--- candidate.py" in diff_proc.stdout
+
+    seed_g4 = parse_candidate_code(build_seed_program_source("google/gemma-4-26B-A4B-it"), name="g4")
+    gcloud_cmd = build_gcloud_rollout_command(
+        seed_g4,
+        project_id="demo-proj",
+        region="us-central1",
+        endpoint_id="999888777",
+        image_uri="us-central1-docker.pkg.dev/demo-proj/repo/vllm-openai:v0.31.0",
+        machine_type="a2-highgpu-1g",
+        accelerator_type="NVIDIA_TESLA_A100",
+        accelerator_count=1,
+    )
+    assert "gcloud ai models upload" in gcloud_cmd
+    assert "gcloud ai endpoints deploy-model 999888777" in gcloud_cmd
+    assert "accelerator-type=nvidia-tesla-a100,count=1" in gcloud_cmd
 
 
 def test_coding_agent_onboarding_skill_present() -> None:
@@ -203,8 +247,163 @@ def test_coding_agent_onboarding_skill_present() -> None:
     assert skill_md.exists(), "Missing .agents/skills/alpha-inference/SKILL.md"
     assert agents_md.exists(), "Missing AGENTS.md"
     skill_txt = skill_md.read_text(encoding="utf-8")
+    readme_txt = readme_md.read_text(encoding="utf-8")
     assert skill_txt.startswith("---\nname: alpha-inference\n")
-    assert ".agents/skills/alpha-inference/SKILL.md" in readme_md.read_text(encoding="utf-8")
+    assert ".agents/skills/alpha-inference/SKILL.md" in readme_txt
+    assert "roles/aiplatform.user" in readme_txt
+    assert "roles/discoveryengine.admin" in readme_txt
+
+
+@pytest.mark.live_e2e
+def test_live_e2e_skill_workflow_with_native_gcloud_endpoint() -> None:
+    """Opt-in live cloud E2E test reproducing the `.agents/skills/alpha-inference/SKILL.md` workflow:
+    1. Verify GCP env & skill prerequisites (`GCP_PROJECT_ID`, `GE_APP_ID`).
+    2. Create a live Vertex AI GPU Endpoint using native `gcloud ai` commands.
+    3. Run `optimize.py --vertex-endpoint-id <ID> --max-programs 2` and verify `summary.md` & `gcloud_rollout.sh`.
+    4. Unconditionally tear down the endpoint & model so `$0/hr` active compute remains.
+    """
+    if os.environ.get("RUN_LIVE_VERTEX_E2E") != "1":
+        pytest.skip("Set RUN_LIVE_VERTEX_E2E=1 to run the live Vertex AI + AlphaEvolve E2E cycle (incurs GPU spend).")
+
+    project_id = os.environ.get("GCP_PROJECT_ID", "").strip()
+    ge_app_id = os.environ.get("GE_APP_ID", "").strip()
+    region = os.environ.get("GCP_REGION", "us-central1").strip()
+    ar_repo = os.environ.get("GCP_AR_REPO", "geap-models").strip()
+    model_id_hf = os.environ.get("E2E_MODEL_ID", "google/gemma-4-26B-A4B-it").strip()
+    machine_type = os.environ.get("E2E_MACHINE_TYPE", "g4-standard-48").strip()
+    accel_type = os.environ.get("E2E_ACCELERATOR_TYPE", "nvidia-rtx-pro-6000").strip()
+    assert project_id and ge_app_id, "GCP_PROJECT_ID and GE_APP_ID must be set for RUN_LIVE_VERTEX_E2E=1"
+
+    gcloud_env = os.environ.copy()
+    if gcloud_env.get("GOOGLE_APPLICATION_CREDENTIALS"):
+        gcloud_env["CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE"] = gcloud_env["GOOGLE_APPLICATION_CREDENTIALS"]
+
+    image_uri = f"{region}-docker.pkg.dev/{project_id}/{ar_repo}/vllm-openai:v0.31.0"
+    created_endpoint_id = ""
+    uploaded_model_id = ""
+
+    with tempfile.TemporaryDirectory(prefix="ae_live_e2e_") as tmp_dir:
+        out_dir = Path(tmp_dir) / "results"
+        try:
+            # Step 1 (from SKILL.md): Zero-cost dry-run verification
+            subprocess.run(
+                [
+                    sys.executable,
+                    "optimize.py",
+                    "--trace",
+                    "examples/custom_openai_chat/sample_trace.jsonl",
+                    "--model",
+                    model_id_hf,
+                    "--dry-run",
+                ],
+                cwd=REPO_ROOT,
+                check=True,
+            )
+
+            # Step 2 (from SKILL.md): Create a live Vertex AI Endpoint via native `gcloud ai`
+            ep_out = subprocess.run(
+                [
+                    "gcloud",
+                    "ai",
+                    "endpoints",
+                    "create",
+                    f"--project={project_id}",
+                    f"--region={region}",
+                    "--display-name=ae-live-e2e-test",
+                    "--enable-dedicated-endpoint",
+                    "--format=value(name)",
+                    "--quiet",
+                ],
+                env=gcloud_env,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+            created_endpoint_id = ep_out.rsplit("/", 1)[-1]
+            assert created_endpoint_id
+
+            mod_out = subprocess.run(
+                [
+                    "gcloud",
+                    "ai",
+                    "models",
+                    "upload",
+                    f"--project={project_id}",
+                    f"--region={region}",
+                    "--display-name=ae-live-e2e-model",
+                    f"--container-image-uri={image_uri}",
+                    "--container-command=vllm,serve",
+                    f"--container-args={model_id_hf},--host=0.0.0.0,--port=8080,--max-model-len=8192,--max-logprobs=16",
+                    "--container-ports=8080",
+                    "--container-predict-route=/v1/chat/completions",
+                    "--container-health-route=/health",
+                    "--format=value(model)",
+                    "--quiet",
+                ],
+                env=gcloud_env,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+            uploaded_model_id = mod_out.rsplit("/", 1)[-1]
+
+            subprocess.run(
+                [
+                    "gcloud",
+                    "ai",
+                    "endpoints",
+                    "deploy-model",
+                    created_endpoint_id,
+                    f"--project={project_id}",
+                    f"--region={region}",
+                    f"--model={uploaded_model_id}",
+                    "--display-name=ae-live-e2e-model",
+                    f"--machine-type={machine_type}",
+                    f"--accelerator=accelerator-type={accel_type},count=1",
+                    "--min-replica-count=1",
+                    "--max-replica-count=1",
+                    "--quiet",
+                ],
+                env=gcloud_env,
+                check=True,
+            )
+
+            # Step 3 (from SKILL.md): Run short AlphaEvolve E2E cycle against `--vertex-endpoint-id`
+            subprocess.run(
+                [
+                    sys.executable,
+                    "optimize.py",
+                    "--vertex-endpoint-id",
+                    created_endpoint_id,
+                    "--trace",
+                    "examples/custom_openai_chat/sample_trace.jsonl",
+                    "--workers",
+                    "1",
+                    "--max-programs",
+                    "2",
+                    "--budget-usd",
+                    "15",
+                    "--skip-mirror",
+                    "--out-dir",
+                    str(out_dir),
+                ],
+                cwd=REPO_ROOT,
+                env=os.environ.copy(),
+                check=True,
+            )
+            assert (out_dir / "summary.md").exists()
+            assert (out_dir / "results.tsv").exists()
+            assert (out_dir / "best_candidate.py").exists()
+            assert (out_dir / "gcloud_rollout.sh").exists()
+        finally:
+            if created_endpoint_id:
+                teardown_endpoint(project_id, region, created_endpoint_id)
+            if uploaded_model_id:
+                subprocess.run(
+                    ["gcloud", "ai", "models", "delete", uploaded_model_id, f"--project={project_id}", f"--region={region}", "--quiet"],
+                    env=gcloud_env,
+                    capture_output=True,
+                )
 
 
 def test_repo_has_zero_leaked_project_ids_or_blog_clutter() -> None:

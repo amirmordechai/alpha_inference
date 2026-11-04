@@ -23,9 +23,9 @@
 | `#1` | `vllm_flags` | Optimized Micro-Batching & Minimal Logprobs | `976.57 ms` | `44.22 req/s` |
 | `#136` | `cuda_graphs` | Optimized CUDA Graph Ladder & Moderate Micro-Batching | `952.11 ms` | `46.92 req/s` |
 
-## Reproduce & Deploy
-- Inspect exact diff against baseline: `python deploy.py --diff`
-- Deploy winning endpoint: `python deploy.py --config examples/email_triage/results/best_candidate.py --deploy`
+## Reproduce & Roll Out to Vertex AI
+- Inspect exact diff against baseline: `python optimize.py --diff`
+- Roll out winning configuration with native `gcloud ai`: `bash examples/email_triage/results/gcloud_rollout.sh`
 - Validate on unseen real-time trace: `python validate.py --deploy-vertex --auto-teardown`
 
 

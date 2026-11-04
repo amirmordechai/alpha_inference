@@ -1,8 +1,8 @@
 # `alpha_inference` — GenAI Inference Optimization with Google Cloud AlphaEvolve
 
-`alpha_inference` connects **official Google Cloud AlphaEvolve** (`Google-Cloud-AI/alphaevolve-on-googlecloud`) to a **Vertex AI GPU Endpoint** (or **GPU VM**) to automatically discover faster `vLLM` serving flags, CUDA graph capture ladders, runtime backends, and custom `@triton.jit` GPU kernels for your exact workload trace.
+`alpha_inference` connects **official Google Cloud AlphaEvolve** (`Google-Cloud-AI/alphaevolve-on-googlecloud`) to any **Vertex AI GPU Endpoint** (or **GPU VM**) to automatically discover faster `vLLM` inference flags, CUDA graph capture ladders, runtime backends, and custom `@triton.jit` GPU kernels for your own workload.
 
-Every candidate is verified on live GPU hardware behind a **Layer-2 Token-Logprob KL Equivalence Gate** so latency and throughput gains never degrade model quality.
+Works across **any GPU** (`L4`, `A100`, `H100`, `RTX PRO 6000`, single- or multi-GPU `TP`), **any `vLLM`-supported model**, and **any OpenAI-compatible JSONL workload trace** — with every candidate verified behind a **Layer-2 Token-Logprob KL Equivalence Gate** so speedups never degrade output quality.
 
 ---
 
@@ -11,98 +11,132 @@ Every candidate is verified on live GPU hardware behind a **Layer-2 Token-Logpro
 Spin up your coding agent (Antigravity, Gemini CLI, Claude Code, Codex, or Cursor) in this repo and prompt:
 
 ```text
-Hi, have a look at .agents/skills/alpha-inference/SKILL.md and set me up to optimize inference for my model and workload!
+Hi, have a look at .agents/skills/alpha-inference/SKILL.md and set me up to optimize inference for my workload!
 ```
 
-The [`.agents/skills/alpha-inference/SKILL.md`](.agents/skills/alpha-inference/SKILL.md) runbook walks your agent through environment setup, deploying or attaching a live Vertex AI GPU Endpoint, formatting your JSONL trace, verifying with `$0` `--dry-run` checks, and launching optimization safely.
+The [`.agents/skills/alpha-inference/SKILL.md`](.agents/skills/alpha-inference/SKILL.md) skill walks your agent through verifying GCP IAM & quotas, connecting (or creating) a live Vertex AI GPU Endpoint with `gcloud ai`, formatting your JSONL trace, running `$0` `--dry-run` checks, and launching optimization safely.
 
 ---
 
-## How It Works
+## Prerequisites (Google Cloud IAM, Quotas & AlphaEvolve)
 
-1. **Seed (`candidate.py`):** Defines your starting `vLLM` configuration inside `# EVOLVE-BLOCK-START ... # EVOLVE-BLOCK-END`.
-2. **Evolve (`optimize.py`):** Official Google Cloud AlphaEvolve mutates `candidate.py`, hot-swaps `vLLM` in place on warm GPU endpoints (without cold cloud VM redeployments), checks token-logprob KL equivalence, and replays your production trace at **1:1 real-time arrival timestamps**.
-3. **Validate & Deploy (`validate.py` / `deploy.py`):** Replays an **unseen** production trace side-by-side (Baseline vs. Best Evolved) and rolls out the winning configuration to your Vertex AI Endpoint.
+Before running live cloud optimization, ensure your Google Cloud project has:
+
+1. **Enabled Google Cloud APIs:**
+   ```bash
+   gcloud services enable \
+     aiplatform.googleapis.com \
+     discoveryengine.googleapis.com \
+     artifactregistry.googleapis.com \
+     cloudbuild.googleapis.com \
+     --project=$GCP_PROJECT_ID
+   ```
+2. **Gemini Enterprise with Google Cloud AlphaEvolve (`GE_APP_ID`):**
+   - An active **Gemini Enterprise** (Discovery Engine) app (`locations/global/collections/default_collection/engines/<GE_APP_ID>`) with the **AlphaEvolve API** enabled (`Google-Cloud-AI/alphaevolve-on-googlecloud`).
+3. **Required GCP IAM Roles** (on your user identity or Service Account):
+   - `roles/aiplatform.user` — Inspect, create, deploy, query (`:rawPredict`), and tear down Vertex AI Models & Endpoints.
+   - `roles/discoveryengine.admin` *(or `roles/discoveryengine.editor`)* — Create and run AlphaEvolve experiments in Gemini Enterprise.
+   - `roles/artifactregistry.writer` & `roles/cloudbuild.builds.editor` — Only required if mirroring a public Docker Hub `vllm/vllm-openai` image into your project's Artifact Registry.
+4. **Vertex AI GPU Serving Quota:**
+   - Custom-model serving GPU quota in `GCP_REGION` (e.g., `NVIDIA L4`, `A100`, `H100`, or `RTX PRO 6000` GPUs for `Custom model serving`).
 
 ---
 
 ## Quickstart
 
-### 1. Install & Configure Google Cloud Auth
-Requires Python `3.10+`, a Google Cloud project with **Vertex AI** enabled, and an **AlphaEvolve-enabled Gemini Enterprise engine** (`GE_APP_ID`).
-
+### 1. Install & Configure Auth
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
 
 cp .env.example .env
-# Edit .env with your GCP_PROJECT_ID and GE_APP_ID
+# Set GCP_PROJECT_ID, GE_APP_ID, and GCP_REGION in .env
 gcloud auth application-default login
 ```
 
-Verify your trace and configuration locally with **`$0` cloud spend**:
+Verify your trace and setup locally with **`$0` cloud spend**:
 ```bash
 python optimize.py --dry-run
 python validate.py --dry-run
 ```
 
-### 2. Connect a Live Vertex AI Endpoint (or Deploy One in 1 Command)
+### 2. Bring a Live Vertex AI Endpoint (or Create One with `gcloud ai`)
 
-If you don't have a live Vertex AI GPU Endpoint yet, deploy any HuggingFace model with warm hot-reload enabled in one command:
+Already serving a model on Vertex AI (via Model Garden, Terraform, or `gcloud ai`)? Grab its `VERTEX_ENDPOINT_ID` — `optimize.py` inspects the live endpoint and **automatically inherits its GPU type, machine spec, container image, and model**.
+
+Don't have a live Vertex AI GPU Endpoint yet? Create one with native `gcloud ai` commands:
 ```bash
-python deploy.py \
-  --model google/gemma-4-26B-A4B-it \
-  --hot-reload --deploy \
-  --out-json endpoint.json
-```
+# 1. Create a Dedicated Vertex AI Endpoint
+VERTEX_ENDPOINT_ID=$(gcloud ai endpoints create \
+  --project=$GCP_PROJECT_ID --region=$GCP_REGION \
+  --display-name=my-vllm-endpoint \
+  --enable-dedicated-endpoint \
+  --format="value(name)" | awk -F/ '{print $NF}')
 
-*(Already have a live Vertex AI Endpoint ID? Enable hot-reload on it with `python deploy.py --endpoint-id $VERTEX_ENDPOINT_ID --hot-reload --deploy`, or let `optimize.py` spin up temporary parallel workers automatically with `--deploy-vertex --workers 4 --auto-teardown`.)*
+# 2. Upload & deploy any HuggingFace model on vLLM (e.g., Gemma 4 26B A4B IT)
+MODEL_ID=$(gcloud ai models upload \
+  --project=$GCP_PROJECT_ID --region=$GCP_REGION \
+  --display-name=gemma-4-26b-vllm \
+  --container-image-uri=$VLLM_IMAGE_URI \
+  --container-command="vllm,serve" \
+  --container-args="google/gemma-4-26B-A4B-it,--host=0.0.0.0,--port=8080,--max-model-len=8192" \
+  --container-ports=8080 \
+  --container-predict-route=/v1/chat/completions \
+  --container-health-route=/health \
+  --format="value(model)")
+
+gcloud ai endpoints deploy-model $VERTEX_ENDPOINT_ID \
+  --project=$GCP_PROJECT_ID --region=$GCP_REGION \
+  --model="$MODEL_ID" --display-name=gemma-4-26b-vllm \
+  --machine-type=g4-standard-48 \
+  --accelerator=accelerator-type=nvidia-rtx-pro-6000,count=1
+```
 
 ### 3. Optimize, Validate & Roll Out
 
 ```bash
-# 1. Optimize directly against your live Vertex AI Endpoint:
+# 1. Optimize against your Vertex Endpoint (clones warm hot-reload search workers & tears them down automatically)
 python optimize.py \
   --vertex-endpoint-id $VERTEX_ENDPOINT_ID \
-  --trace examples/email_triage/monday_peak_3m.jsonl \
+  --trace examples/custom_openai_chat/sample_trace.jsonl \
   --metric p99_latency \
   --max-programs 100 \
-  --budget-usd 50
+  --budget-usd 50 \
+  --out-dir results/my_workload
 
-# 2. Replay a held-out unseen production window side-by-side (Before vs. After):
+# 2. Replay a held-out unseen 1:1 production window side-by-side (Before vs. After)
 python validate.py \
-  --trace examples/email_triage/tuesday_peak_30m.jsonl \
-  --deploy-vertex --auto-teardown
+  --trace examples/custom_openai_chat/sample_trace.jsonl \
+  --deploy-vertex --auto-teardown \
+  --out-dir results/my_workload
 
-# 3. Inspect the discovered diff and roll out the winner to your Vertex Endpoint:
-python deploy.py --diff
-python deploy.py \
-  --config examples/email_triage/results/best_candidate.py \
-  --endpoint-id $VERTEX_ENDPOINT_ID --deploy
+# 3. Inspect the discovered diff and roll out the winner via generated native `gcloud ai` script
+python optimize.py --diff --out-dir results/my_workload
+bash results/my_workload/gcloud_rollout.sh
 ```
 
 | Key Flag | Options / Purpose |
 | :--- | :--- |
-| `--vertex-endpoint-id` | Attach directly to one or more live Vertex AI GPU Endpoint IDs (auto-resolves Dedicated DNS & hot-reload token). |
-| `--endpoint-json` | Attach using the JSON metadata file written by `deploy.py --out-json`. |
-| `--deploy-vertex` | Automatically provisions warm `NVIDIA RTX PRO 6000` (`g4-standard-48`) Vertex AI Dedicated Endpoints (`--auto-teardown` deletes them on exit). |
+| `--vertex-endpoint-id` | Live Vertex AI Endpoint ID (auto-inherits GPU, machine type, container image, and model; spins up temporary hot-reload search workers without disrupting live traffic). |
+| `--deploy-vertex` | Provision temporary search worker(s) directly from `--model` / `candidate.py` without an existing endpoint (`--machine-type`, `--accelerator-type`, `--accelerator-count`). |
 | `--endpoint` | Attach to existing GPU VM(s) running `python -m alpha_inference.reload_proxy`. |
-| `--trace` | Path to your JSONL request trace (`messages`/`prompt` chat or structured task). |
+| `--trace` | Path to any OpenAI-compatible JSONL request trace (`messages`/`prompt` + `timestamp`). |
 | `--metric` | `p99_latency` *(minimize)*, `latency` *(minimize P50)*, `throughput` *(maximize req/s)*, `ttft` *(minimize P99 Time-To-First-Token)*. |
 | `--budget-usd` | Hard USD cloud-spend circuit breaker (`BudgetedAlphaEvolveExperiment`). |
 
 ---
 
-## Articulated Output Format
+## Testing (`$0` Unit Suite + Live Vertex E2E Cycle)
 
-Every run populates `--out-dir` (see [`examples/email_triage/results/`](examples/email_triage/results/)) with a standardized set of artifacts:
+```bash
+# Offline unit & mock-server integration suite ($0 cloud spend):
+pytest -v
 
-- **`summary.md`** — Human-readable report with Baseline vs. Best metrics, discovered breakthroughs, and unseen validation table.
-- **`results.tsv`** — Tab-separated ledger of every evaluated candidate, status (`keep`, `discard`, `crash`, `invalid`), latency, throughput, and KL divergence.
-- **`best_candidate.py`** — Winning evolved Python configuration (deployable directly with `python deploy.py --config <path> --deploy`).
-- **`progress.png`** — Optimization trajectory plot across evaluations.
-- **`unseen_validation.json` & `unseen_validation.png`** — Held-out 1:1 production replay results.
+# Opt-in live Google Cloud E2E cycle (creates a Vertex GPU Endpoint via `gcloud ai`,
+# runs the SKILL.md optimization & validation loop, and tears down all cloud resources):
+RUN_LIVE_VERTEX_E2E=1 pytest -v -k live_e2e
+```
 
 ---
 
@@ -115,17 +149,17 @@ alpha_inference/
 ├── optimize.py                 # Official Google Cloud AlphaEvolve optimization CLI
 ├── validate.py                 # Side-by-side 1:1 real-time unseen trace validator
 ├── candidate.py                # Seed program (# EVOLVE-BLOCK-START ... # EVOLVE-BLOCK-END)
-├── deploy.py                   # Vertex AI Endpoint deployer (`--model`, `--config`, `--diff`, `--delete`)
 ├── alpha_inference/            # Core library
-│   ├── adapters.py             # OpenAI chat + SSE TTFT + structured diffusion adapters
+│   ├── adapters.py             # OpenAI chat + SSE TTFT + structured task adapters
 │   ├── equivalence.py          # Layer-2 token-logprob KL divergence anti-cheating gate
 │   ├── evaluator.py            # 1:1 real-time timestamp replay & throughput probe
 │   ├── reload_proxy.py         # Warm GPU hot-reload supervisor & Kineto profiler
-│   ├── reporting.py            # AST safety validator, Vertex inspector, plots & summary
+│   ├── reporting.py            # AST safety validator, plots & summary generator
+│   ├── vertex.py               # Hardware-agnostic Vertex inspector & `gcloud ai` helpers
 │   └── problem.md              # Optimization contract & search-space guide for AlphaEvolve
 ├── examples/
-│   ├── email_triage/           # Reference benchmark traces + full articulated results
-│   └── custom_openai_chat/     # Template trace & guide for standard OpenAI chat models
+│   ├── email_triage/           # Reference benchmark traces + articulated results
+│   └── custom_openai_chat/     # Template trace & guide for any OpenAI chat workload
 └── tests/
-    └── test_alpha_inference.py # Offline unit & integration test suite ($0 cloud spend)
+    └── test_alpha_inference.py # Offline unit suite + opt-in live `gcloud ai` E2E test
 ```

@@ -1,75 +1,85 @@
 ---
 name: alpha-inference
 description: >-
-  Onboard a user and run autonomous GenAI inference optimization on Vertex AI
-  GPU Endpoints or GPU VMs using official Google Cloud AlphaEvolve. Use this
-  skill when the user asks to set up alpha_inference, deploy a model endpoint,
-  prepare a JSONL workload trace, or launch an optimization and validation run.
+  Onboard a user and run autonomous GenAI inference optimization on any Vertex AI
+  GPU Endpoint or GPU VM using official Google Cloud AlphaEvolve. Use this skill
+  when the user asks to set up alpha_inference, verify GCP IAM/quotas, create or
+  attach a Vertex AI Endpoint, prepare a JSONL workload trace, or run E2E optimization.
 ---
 
-# `alpha_inference` — Coding Agent Onboarding & Runbook
+# `alpha_inference` — Coding Agent Onboarding & E2E Runbook
 
-Follow these steps interactively with the user to set up and run an autonomous inference optimization experiment.
+Follow these steps interactively with the user to set up and run an autonomous inference optimization experiment across any GPU, model, and workload.
 
-## Architecture Overview (Read First)
-- **`candidate.py`** — The single seed file mutated by Google Cloud AlphaEvolve (`# EVOLVE-BLOCK-START ... # EVOLVE-BLOCK-END`). Controls `vLLM` flags, CUDA graph ladders, runtime env vars, and custom `@triton.jit` GPU kernels.
-- **`optimize.py`** — Connects official Google Cloud AlphaEvolve (`AlphaEvolveClient`) to one or more warm GPU endpoints, enforces the Layer-2 Token-Logprob KL Equivalence Gate, and replays a 1:1 timestamped trace.
+## Architecture Overview
+- **`candidate.py`** — Single seed file mutated by Google Cloud AlphaEvolve (`# EVOLVE-BLOCK-START ... # EVOLVE-BLOCK-END`). Controls `vLLM` flags, CUDA graph ladders, runtime env vars, and custom `@triton.jit` GPU kernels.
+- **`optimize.py`** — Inspects a live `--vertex-endpoint-id` (or provisions `--deploy-vertex` workers), runs official `AlphaEvolveClient` search with warm `<60s` `vLLM` hot-swaps, enforces the Layer-2 Token-Logprob KL Equivalence Gate, and emits `gcloud_rollout.sh`.
 - **`validate.py`** — Replays a disjoint, unseen 1:1 production trace side-by-side on Baseline (`candidate.py`) vs. Best Evolved (`best_candidate.py`).
-- **`deploy.py`** — Deploys any model or evolved `best_candidate.py` to a Vertex AI Dedicated GPU Endpoint, prints `--diff`, or tears endpoints down (`--delete`).
 
 ---
 
-## Step 1: Verify Python Environment & Google Cloud Credentials
+## Step 1: Verify GCP Prerequisites, IAM & Environment
 
-1. Create or activate `.venv` and install dependencies:
+1. Activate `.venv` and install dependencies:
    ```bash
    python3 -m venv .venv
    source .venv/bin/activate
    pip install -e ".[dev]"
    ```
-2. Check `.env` (copy from `.env.example` if missing) and verify with the user:
-   - `GCP_PROJECT_ID` — Google Cloud project with Vertex AI enabled.
-   - `GE_APP_ID` — AlphaEvolve-enabled Gemini Enterprise engine ID.
-   - `GCP_REGION` — GPU region (default `us-central1`).
-   - Run `gcloud auth application-default login` if Application Default Credentials are not configured.
+2. Verify `.env` (`GCP_PROJECT_ID`, `GE_APP_ID`, `GCP_REGION`) and check prerequisites:
+   - **APIs enabled:** `aiplatform.googleapis.com`, `discoveryengine.googleapis.com`, `artifactregistry.googleapis.com`.
+   - **Gemini Enterprise:** `GE_APP_ID` points to an AlphaEvolve-enabled Gemini Enterprise engine.
+   - **IAM Roles:** `roles/aiplatform.user` and `roles/discoveryengine.admin` (plus `roles/artifactregistry.writer` & `roles/cloudbuild.builds.editor` if mirroring a public Docker Hub `vllm` image).
+   - **GPU Quota:** Serving quota available in `GCP_REGION` for the target GPU (`NVIDIA_L4`, `NVIDIA_TESLA_A100`, `NVIDIA_H100_80GB`, `NVIDIA_RTX_PRO_6000`, etc.).
 
 ---
 
-## Step 2: Connect or Deploy a Live Vertex AI GPU Endpoint
+## Step 2: Connect an Existing Vertex AI Endpoint (or Create One via `gcloud ai`)
 
-Ask the user which setup applies:
+Ask the user whether they already have a live Vertex AI GPU Endpoint ID:
 
-- **Option A — User already has a live Vertex AI Endpoint ID (`<ENDPOINT_ID>`):**
-  - If it was deployed with `--hot-reload`, pass `--vertex-endpoint-id <ENDPOINT_ID>` directly to `optimize.py`.
-  - If it is a standard Vertex Endpoint without hot-reload enabled yet, either enable hot-reload on it:
-    ```bash
-    python deploy.py --endpoint-id <ENDPOINT_ID> --hot-reload --deploy --out-json endpoint.json
-    ```
-    or pass `--vertex-endpoint-id <ENDPOINT_ID> --deploy-vertex --auto-teardown` to `optimize.py` to clone its model onto temporary search workers without touching live traffic.
+- **Option A — Existing Vertex AI Endpoint (`VERTEX_ENDPOINT_ID`):**
+  Pass `--vertex-endpoint-id $VERTEX_ENDPOINT_ID` to `optimize.py`. It automatically inspects the endpoint, inherits its GPU type, machine type, container image, and model, and spins up temporary hot-reload search workers without disturbing live production traffic.
 
-- **Option B — User needs a live Vertex AI GPU Endpoint first (1 command):**
+- **Option B — Create a new Vertex AI Endpoint with native `gcloud ai`:**
   ```bash
-  python deploy.py --model google/gemma-4-26B-A4B-it --hot-reload --deploy --out-json endpoint.json
+  VERTEX_ENDPOINT_ID=$(gcloud ai endpoints create \
+    --project=$GCP_PROJECT_ID --region=$GCP_REGION \
+    --display-name=my-vllm-endpoint --enable-dedicated-endpoint \
+    --format="value(name)" | awk -F/ '{print $NF}')
+
+  MODEL_ID=$(gcloud ai models upload \
+    --project=$GCP_PROJECT_ID --region=$GCP_REGION \
+    --display-name=my-vllm-model \
+    --container-image-uri=$VLLM_IMAGE_URI \
+    --container-command="vllm,serve" \
+    --container-args="google/gemma-4-26B-A4B-it,--host=0.0.0.0,--port=8080,--max-model-len=8192" \
+    --container-ports=8080 \
+    --container-predict-route=/v1/chat/completions \
+    --container-health-route=/health \
+    --format="value(model)")
+
+  gcloud ai endpoints deploy-model $VERTEX_ENDPOINT_ID \
+    --project=$GCP_PROJECT_ID --region=$GCP_REGION \
+    --model="$MODEL_ID" --display-name=my-vllm-model \
+    --machine-type=g4-standard-48 \
+    --accelerator=accelerator-type=nvidia-rtx-pro-6000,count=1
   ```
 
-- **Option C — Fully ephemeral multi-worker search:**
-  Pass `--deploy-vertex --workers 4 --auto-teardown` to `optimize.py` so endpoints are provisioned only for the run and deleted automatically on exit.
+- **Option C — Direct Ephemeral Workers (No Pre-Existing Endpoint Required):**
+  Pass `--deploy-vertex --auto-teardown --model <HF_MODEL_ID> --machine-type <MACHINE> --accelerator-type <GPU>` directly to `optimize.py`.
 
 ---
 
-## Step 3: Prepare or Select the Workload Trace
+## Step 3: Prepare Production-Realistic JSONL Workload Traces
 
-Check whether the user wants to run the included benchmark (`examples/email_triage/`) or their own workload:
-- Custom traces are standard JSONL files where each line has `request_id`, `timestamp` (ISO-8601 or float seconds for 1:1 replay), and OpenAI `messages` (see [`examples/custom_openai_chat/sample_trace.jsonl`](../../../examples/custom_openai_chat/sample_trace.jsonl)).
-- Split custom logs into two **disjoint** time windows:
-  1. A short **search peak window** (e.g., 3 minutes of peak traffic) for `--trace` in `optimize.py`.
-  2. A **held-out unseen window** (e.g., 15–30 minutes from another day) for `--trace` in `validate.py`.
+Ensure traces mirror real customer traffic without artificial cache shortcuts:
+- Format each JSONL line with `request_id`, `timestamp` (ISO-8601 or float seconds for 1:1 replay), and OpenAI `messages` (`[{"role": "system", ...}, {"role": "user", ...}]`).
+- **Critical Anti-Cache-Bias Rule:** Never duplicate/recycle identical user prompts across a trace window (otherwise `vLLM` prefix caching hits artificial 100% cache rates that never happen in real production). Shared system instructions are realistic; user payloads must be unique and disjoint between the **search trace** (`optimize.py`) and **unseen validation trace** (`validate.py`).
 
 ---
 
 ## Step 4: Run Zero-Cost Dry-Run Checks (`$0` Spend)
-
-Always verify configuration, trace parsing, and AST validation before provisioning GPUs:
 
 ```bash
 python optimize.py --trace <SEARCH_TRACE.jsonl> --metric p99_latency --dry-run
@@ -79,33 +89,27 @@ pytest -q
 
 ---
 
-## Step 5: Confirm Budget & Launch Optimization
+## Step 5: Confirm Budget & Execute Optimization -> Validation -> Rollout
 
-> **Important Guardrail:** Always state the target GPU count, `--max-programs`, and `--budget-usd` cap to the user and get explicit confirmation before launching live GPU compute.
+> **Important Guardrail:** Always state the GPU type, `--workers` count, `--max-programs`, and `--budget-usd` cap to the user and get explicit approval before provisioning live GPUs.
 
-1. **Run AlphaEvolve optimization:**
-   ```bash
-   # Against a live Vertex AI Endpoint:
-   python optimize.py \
-     --vertex-endpoint-id <ENDPOINT_ID> \
-     --trace <SEARCH_TRACE.jsonl> \
-     --metric p99_latency \
-     --max-programs 100 \
-     --budget-usd 50 \
-     --out-dir results/my_workload
-   ```
-   *(Or replace `--vertex-endpoint-id <ENDPOINT_ID>` with `--endpoint-json endpoint.json` or `--deploy-vertex --workers 4 --auto-teardown`.)*
+```bash
+# 1. Run AlphaEvolve search
+python optimize.py \
+  --vertex-endpoint-id $VERTEX_ENDPOINT_ID \
+  --trace <SEARCH_TRACE.jsonl> \
+  --metric p99_latency \
+  --max-programs 100 \
+  --budget-usd 50 \
+  --out-dir results/my_workload
 
-2. **Validate Before vs. After on unseen traffic:**
-   ```bash
-   python validate.py \
-     --trace <UNSEEN_TRACE.jsonl> \
-     --deploy-vertex --auto-teardown \
-     --out-dir results/my_workload
-   ```
+# 2. Validate Before vs. After on unseen 1:1 production traffic
+python validate.py \
+  --trace <UNSEEN_TRACE.jsonl> \
+  --deploy-vertex --auto-teardown \
+  --out-dir results/my_workload
 
-3. **Review discoveries & roll out to production:**
-   ```bash
-   python deploy.py --config results/my_workload/best_candidate.py --diff
-   python deploy.py --config results/my_workload/best_candidate.py --endpoint-id <ENDPOINT_ID> --deploy
-   ```
+# 3. Inspect diff & roll out winning config via generated native `gcloud ai` script
+python optimize.py --diff --out-dir results/my_workload
+bash results/my_workload/gcloud_rollout.sh
+```

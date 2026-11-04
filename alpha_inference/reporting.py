@@ -30,9 +30,9 @@ from alpha_inference.adapters import (
     resolve_completions_url,
 )
 from alpha_inference.evaluator import METRIC_INFO, TraceEvalResult, format_metric, normalize_metric
-MACHINE_TYPE = "g4-standard-48"
-ACCELERATOR_TYPE = "NVIDIA_RTX_PRO_6000"
-ACCELERATOR_COUNT = 1
+MACHINE_TYPE = os.environ.get("GPU_MACHINE_TYPE", "g4-standard-48")
+ACCELERATOR_TYPE = os.environ.get("GPU_ACCELERATOR_TYPE", "NVIDIA_RTX_PRO_6000")
+ACCELERATOR_COUNT = int(os.environ.get("GPU_ACCELERATOR_COUNT", "1"))
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CANDIDATE_SEED_FILE = REPO_ROOT / "candidate.py"
@@ -219,97 +219,30 @@ def deploy_search_vertex_endpoint(
     baseline_cand: CandidateSpec,
     display_name: str,
     skip_mirror: bool = False,
+    *,
+    upstream_image: str = "",
+    machine_type: str = MACHINE_TYPE,
+    accelerator_type: str = ACCELERATOR_TYPE,
+    accelerator_count: int = ACCELERATOR_COUNT,
 ) -> dict[str, Any]:
-    """Deploy a warm hot-reloadable Vertex AI Dedicated GPU Endpoint."""
-    from google.cloud import aiplatform
-    from deploy import ensure_ar_image_mirrored
+    """Deploy a warm hot-reloadable Vertex AI Dedicated GPU Endpoint matching any GPU/model spec."""
+    from alpha_inference.vertex import DEFAULT_UPSTREAM_VLLM_IMAGE, deploy_vertex_worker_or_endpoint
 
-    t0 = time.perf_counter()
-    aiplatform.init(project=project_id, location=region)
-    ar_image_uri = (
-        f"{region}-docker.pkg.dev/{project_id}/{ar_repo}/vllm-openai:v0.31.0"
-        if skip_mirror
-        else ensure_ar_image_mirrored(project_id, region, ar_repo)
+    info = deploy_vertex_worker_or_endpoint(
+        cand=baseline_cand,
+        project_id=project_id,
+        region=region,
+        ar_repo=ar_repo,
+        display_name=display_name,
+        skip_mirror=skip_mirror,
+        upstream_image=upstream_image or DEFAULT_UPSTREAM_VLLM_IMAGE,
+        machine_type=machine_type,
+        accelerator_type=accelerator_type,
+        accelerator_count=accelerator_count,
+        hot_reload=True,
     )
-    admin_token = secrets.token_urlsafe(24)
-    proxy_b64 = base64.b64encode(RELOAD_PROXY_FILE.read_bytes()).decode("ascii")
-    init_spec = json.dumps(
-        {
-            "vllm_args": baseline_cand.vllm_args,
-            "env_vars": baseline_cand.env_vars,
-            "custom_kernel_code": baseline_cand.custom_kernel_code,
-            "startup_timeout_sec": 900.0,
-        }
-    )
-    env_vars = {
-        "AE_ADMIN_TOKEN": admin_token,
-        "AE_PROXY_B64": proxy_b64,
-        "AE_INITIAL_SPEC_JSON": init_spec,
-        "PYTHONUNBUFFERED": "1",
-    }
-    hf_tok = os.environ.get("HF_TOKEN", "").strip()
-    if hf_tok:
-        env_vars["HF_TOKEN"] = hf_tok
-
-    bootstrap = (
-        'python3 -c "import base64, os, pathlib; '
-        "pathlib.Path('/tmp/reload_proxy.py').write_bytes(base64.b64decode(os.environ['AE_PROXY_B64']))\" && "
-        "exec python3 /tmp/reload_proxy.py"
-    )
-    model = aiplatform.Model.upload(
-        display_name=f"{display_name}-model",
-        serving_container_image_uri=ar_image_uri,
-        serving_container_command=["bash", "-lc", bootstrap],
-        serving_container_args=[],
-        serving_container_environment_variables=env_vars,
-        serving_container_ports=[8080],
-        serving_container_predict_route="/v1/chat/completions",
-        serving_container_health_route="/health",
-    )
-
-    last_exc: Exception | None = None
-    endpoint = None
-    for attempt in range(3):
-        endpoint = aiplatform.Endpoint.create(display_name=display_name, dedicated_endpoint_enabled=True)
-        try:
-            model.deploy(
-                endpoint=endpoint,
-                deployed_model_display_name=display_name,
-                machine_type=MACHINE_TYPE,
-                accelerator_type=ACCELERATOR_TYPE,
-                accelerator_count=ACCELERATOR_COUNT,
-                min_replica_count=1,
-                max_replica_count=1,
-                deploy_request_timeout=3600,
-                sync=True,
-            )
-            last_exc = None
-            break
-        except Exception as exc:  # noqa: BLE001
-            last_exc = exc
-            try:
-                endpoint.delete(sync=True)
-            except Exception:  # noqa: BLE001
-                pass
-            if attempt < 2:
-                time.sleep(20.0 * (attempt + 1))
-    if last_exc is not None or endpoint is None:
-        raise last_exc or RuntimeError("Search Vertex Endpoint deployment failed")
-
-    endpoint = aiplatform.Endpoint(endpoint.resource_name)
-    dns = getattr(endpoint, "dedicated_endpoint_dns", "") or ""
-    return {
-        "endpoint_id": endpoint.name,
-        "endpoint_resource_name": endpoint.resource_name,
-        "dedicated_endpoint_dns": dns,
-        "chat_completions_url": (
-            f"https://{dns}/v1/projects/{project_id}/locations/{region}/endpoints/{endpoint.name}:rawPredict"
-            if dns
-            else ""
-        ),
-        "admin_token": admin_token,
-        "deploy_wall_sec": round(time.perf_counter() - t0, 2),
-    }
+    info["deploy_wall_sec"] = info.get("total_deploy_sec", 0.0)
+    return info
 
 
 async def reload_endpoint(
@@ -611,10 +544,10 @@ def write_articulated_summary(
 
     lines.extend(
         [
-            "## Reproduce & Deploy",
-            "- Inspect exact diff against baseline: `python deploy.py --diff`",
-            "- Deploy winning endpoint: `python deploy.py --config examples/email_triage/results/best_candidate.py --deploy`",
-            "- Validate on unseen real-time trace: `python validate.py --deploy-vertex --auto-teardown`",
+            "## Reproduce & Roll Out to Vertex AI",
+            f"- Inspect exact diff against baseline: `python optimize.py --diff --out-dir {out_dir}`",
+            f"- Roll out winning configuration with native `gcloud ai`: `bash {out_dir}/gcloud_rollout.sh`",
+            f"- Validate on unseen real-time trace: `python validate.py --deploy-vertex --auto-teardown --out-dir {out_dir}`",
             "",
         ]
     )

@@ -10,6 +10,6 @@ This folder contains the runnable traces and full results from optimizing **`nvi
 ## Articulated Output (`results/`)
 - `summary.md` — Executive table comparing Ground-Zero Baseline vs. Best Evolved, every record-setting breakthrough, and held-out 30-minute unseen validation.
 - `results.tsv` — Full evaluation ledger (`iteration`, `status`, `category`, `p99_latency_ms`, `p50_latency_ms`, `throughput_rps`, `mean_kl`).
-- `best_candidate.py` — Winning evolved `candidate.py` program (deployable via `python deploy.py --config examples/email_triage/results/best_candidate.py --deploy`).
+- `best_candidate.py` — Winning evolved `candidate.py` program (diff via `python optimize.py --diff`; roll out to Vertex AI via `bash examples/email_triage/results/gcloud_rollout.sh`).
 - `progress.png` — AlphaEvolve optimization trajectory chart.
 - `unseen_validation.json` & `unseen_validation.png` — Side-by-side 30-minute unseen production replay telemetry and chart.

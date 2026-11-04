@@ -33,3 +33,6 @@ alpha_inference = ["problem.md"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+markers = [
+    "live_e2e: Live Google Cloud Vertex AI + AlphaEvolve end-to-end test (requires RUN_LIVE_VERTEX_E2E=1 and incurs GPU spend)",
+]
