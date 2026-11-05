@@ -15,55 +15,52 @@ from typing import Any
 def get_candidate_config() -> dict[str, Any]:
     """Return the vLLM serving configuration and optional custom Triton GPU kernel."""
     return {
-        "plain_title": "Tighter Micro-Batching & V1 Runner Restoration",
+        "plain_title": "Async Micro-Burst Scheduling & Core Saturation",
         "hypothesis": (
-            "We found that max-num-seqs=20 and the experimental V2 model runner "
-            "severely degraded P99 latency (1222.29 ms). We restore high-performance "
-            "P99 latency by reverting V2 model runner, tuning OMP_NUM_THREADS to 8, "
-            "and setting max-num-seqs=10 with max-num-batched-tokens=4096 to prevent "
-            "head-of-line blocking while absorbing bursts. We also set gpu-memory-utilization=0.90 "
-            "to reduce allocator fragmentation."
+            "Crazy Idea: Decouple the serving event loop completely using `--async-scheduling` while "
+            "hyper-tuning Chunked Prefill with `--max-num-batched-tokens=2048` and `--long-prefill-token-threshold=512` "
+            "to force micro-prefill bursts that absolutely never block active decodes. "
+            "Furthermore, we drastically crank `OMP_NUM_THREADS` to `24` to fully saturate the host's 48 CPUs "
+            "during async orchestration, obliterating P99 tail latencies caused by CPU scheduling stalls."
         ),
         "category": "vllm_flags",  # vllm_flags | cuda_graphs | backends | triton_kernels
         "vllm_args": [
-            "nvidia/diffusiongemma-26B-A4B-it-NVFP4",
-            "--served-model-name=diffusiongemma-26b",
+            "google/gemma-4-26B-A4B-it",
+            "--served-model-name=google/gemma-4-26B-A4B-it",
             "--host=0.0.0.0",
             "--port=8080",
-            '--diffusion-config={"canvas_length": 64}',
+            "--max-model-len=8192",
             "--max-logprobs=5",
-            '--override-generation-config={"max_new_tokens": null}',
-            "--enable-auto-tool-choice",
-            "--tool-call-parser=gemma4",
-            "--reasoning-parser=gemma4",
-            "--enable-prefix-caching",
-            "--async-scheduling",
-            '--limit-mm-per-prompt={"image": 0, "video": 0}',
-            "--attention-backend=TRITON_ATTN",
-            "--max-num-seqs=10",
-            "--max-num-batched-tokens=4096",
-            "--max-model-len=12288",
-            "--gpu-memory-utilization=0.90",
+            "--gpu-memory-utilization=0.95",
+            "--language-model-only",
             "--disable-uvicorn-access-log",
-            '--compilation-config={"cudagraph_capture_sizes": [1, 2, 4, 8, 12, 16, 20, 24, 32, 40, 48, 64, 80, 96, 128, 160, 192, 256, 384, 512, 768, 1024, 1536, 2048, 3072, 4096]}',
+            "--enable-chunked-prefill",
+            "--max-num-batched-tokens=2048",
+            "--long-prefill-token-threshold=512",
+            "--max-num-seqs=256",
+            "--enable-prefix-caching",
+            "--attention-backend=FLASHINFER",
+            "--async-scheduling",
         ],
         "env_vars": {
-            "TOKENIZERS_PARALLELISM": "true",
-            "OMP_NUM_THREADS": "8",
             "PYTHONUNBUFFERED": "1",
+            "TOKENIZERS_PARALLELISM": "true",
+            "OMP_NUM_THREADS": "24",
+            "CUDA_DEVICE_MAX_CONNECTIONS": "1",
+            "VLLM_USE_V2_MODEL_RUNNER": "1",
+            "TORCHINDUCTOR_FX_GRAPH_CACHE": "1",
         },
-        "custom_kernel_code": """try:
+        "custom_kernel_code": """
+try:
+    import gc
+    gc.disable()
+except Exception:
+    pass
+
+try:
     import torch
-    import torch._inductor.config as config
-    config.coordinate_descent_tuning = False
-    config.coordinate_descent_check_all_directions = False
-    config.triton.cooperative_reduction = True
-    config.triton.unique_kernel_names = True
-    config.force_fuse_int_mm_with_mul = True
-    config.fx_graph_cache = True
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
-    torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = True
+    torch.backends.cudnn.benchmark = True
+    torch.set_float32_matmul_precision('high')
 except Exception:
     pass
 """,

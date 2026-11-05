@@ -15,39 +15,37 @@ from typing import Any
 def get_candidate_config() -> dict[str, Any]:
     """Return the vLLM serving configuration and optional custom Triton GPU kernel."""
     return {
-        "plain_title": "Moderate Micro-Batching and Increased OMP Threads",
+        "plain_title": "Chunked Prefill Threshold & OMP Thread Tuning",
         "hypothesis": (
-            "Increase max-num-seqs to 24 and max-num-batched-tokens to 8192 to absorb bursts "
-            "and prevent late queuing delays. Also increase OMP_NUM_THREADS to 8 for better "
-            "host-side thread scheduling during burst arrivals."
+            "Introduce a 2048-token long-prefill threshold to prevent long prefill "
+            "interference with decode steps, and increase OMP_NUM_THREADS to 8 "
+            "to accelerate CPU-side tokenization and runtime scheduling."
         ),
         "category": "vllm_flags",  # vllm_flags | cuda_graphs | backends | triton_kernels
         "vllm_args": [
-            "nvidia/diffusiongemma-26B-A4B-it-NVFP4",
-            "--served-model-name=diffusiongemma-26b",
+            "google/gemma-4-26B-A4B-it",
+            "--served-model-name=google/gemma-4-26B-A4B-it",
             "--host=0.0.0.0",
             "--port=8080",
-            '--diffusion-config={"canvas_length": 64}',
+            "--max-model-len=8192",
             "--max-logprobs=5",
-            '--override-generation-config={"max_new_tokens": null}',
-            "--enable-auto-tool-choice",
-            "--tool-call-parser=gemma4",
-            "--reasoning-parser=gemma4",
-            "--enable-prefix-caching",
-            "--async-scheduling",
-            '--limit-mm-per-prompt={"image": 0, "video": 0}',
-            "--attention-backend=TRITON_ATTN",
-            "--max-num-seqs=24",
-            "--max-num-batched-tokens=8192",
-            "--max-model-len=12288",
             "--gpu-memory-utilization=0.95",
+            "--attention-backend=flashinfer",
+            "--enable-chunked-prefill",
+            "--language-model-only",
+            "--max-num-batched-tokens=4096",
+            "--long-prefill-token-threshold=2048",
+            "--max-num-seqs=256",
+            "--enable-prefix-caching",
             "--disable-uvicorn-access-log",
+            "--async-scheduling",
         ],
         "env_vars": {
-            "VLLM_USE_V2_MODEL_RUNNER": "1",
             "PYTHONUNBUFFERED": "1",
-            "OMP_NUM_THREADS": "8",
             "TOKENIZERS_PARALLELISM": "true",
+            "OMP_NUM_THREADS": "8",
+            "CUDA_DEVICE_MAX_CONNECTIONS": "1",
+            "VLLM_USE_V2_MODEL_RUNNER": "1",
         },
         "custom_kernel_code": "",
     }

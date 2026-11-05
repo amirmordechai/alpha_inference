@@ -13,12 +13,12 @@ Evolve `get_candidate_config()` inside `candidate.py` to optimize live `vLLM` in
 
 ## Optimization Search Space
 1. **`vllm_flags` (Continuous Batching, Chunked Prefill, Prefix Caching & Scheduler):**
-   - Tune `--max-num-seqs` (e.g. `8`..`128`), `--max-num-batched-tokens` (`2048`..`16384`), and `--long-prefill-token-threshold` (`512`..`4096`) to balance prefill-decode interference, queueing delay, and step latency for the active workload utilization.
-   - Explore `--enable-prefix-caching`, `--async-scheduling`, `--max-logprobs` (down to `5`), `--disable-uvicorn-access-log`, `--gpu-memory-utilization` (`0.90`..`0.95`), and KV `--block-size`.
+   - Tune `--max-num-seqs` (e.g. `64`..`256` — avoid starving concurrency under high arrival rates!), `--max-num-batched-tokens` (`4096`..`16384`), and `--long-prefill-token-threshold` (`512`..`4096`) to balance prefill-decode interference, queueing delay, and step latency for the active workload utilization.
+   - Explore `--enable-prefix-caching`, `--async-scheduling`, `--max-logprobs` (down to `5`), `--disable-uvicorn-access-log`, `--gpu-memory-utilization` (`0.90`..`0.95`), KV `--block-size`, and (for multimodal checkpoints serving text-only traces) `--language-model-only` (note: pass `--language-model-only` before lowering `--max-num-batched-tokens` below `8192`, otherwise multimodal encoder token budgets raise `ValueError` at startup).
 2. **`cuda_graphs` (`--compilation-config`):**
    - Tune `cudagraph_capture_sizes` ladders across active decode/prefill batch sizes, `max_cudagraph_capture_size` (`512`, `1024`, `2048`, `4096`), and `pass_config` / `inductor_compile_config` fusions (avoid deprecated `"level"` keys in `vLLM v0.31+`).
 3. **`backends` (Attention, MoE, Tokenizer & Host-Thread Runtime):**
-   - Explore `--attention-backend` (`FLASH_ATTN`, `FLASHINFER`, `TRITON_ATTN`; note `--diffusion-config` models require `TRITON_ATTN`), `TOKENIZERS_PARALLELISM="true"`, `OMP_NUM_THREADS` (`2`..`8`), `CUDA_DEVICE_MAX_CONNECTIONS`, and `VLLM_USE_V2_MODEL_RUNNER`.
+   - Explore `--attention-backend` (`FLASH_ATTN`, `FLASHINFER`, `TRITON_ATTN`; note `FLASHINFER`/`FLASH_ATTN` only support `head_dim <= 256`, so checkpoints with `head_dim=512` full-attention layers or `--diffusion-config` require `TRITON_ATTN`), `TOKENIZERS_PARALLELISM="true"`, `OMP_NUM_THREADS` (`2`..`8`), `CUDA_DEVICE_MAX_CONNECTIONS`, and `VLLM_USE_V2_MODEL_RUNNER`.
 4. **`triton_kernels` (`custom_kernel_code` via `sitecustomize.py`):**
    - `custom_kernel_code` executes via `sitecustomize.py` before `vLLM` worker spawn so `@triton.jit` kernels are captured directly inside CUDA graphs. Always wrap monkey-patches in defensive `try: ... except Exception: pass` guards and never import network or subprocess modules.
    - Target hot GPU ops surfaced in the live Kineto profile (e.g., fused `RMSNorm` + residual add, `tanh` logit softcapping in `tl.float32` cast back to `bf16`, RoPE, SwiGLU/GeGLU epilogues, or MoE routing/reduction helpers).

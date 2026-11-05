@@ -15,32 +15,34 @@ from typing import Any
 def get_candidate_config() -> dict[str, Any]:
     """Return the vLLM serving configuration and optional custom Triton GPU kernel."""
     return {
-        "plain_title": "Fix startup crash and optimize micro-batching",
+        "plain_title": "Disable Chunked Prefill and V2 Runner, High Concurrency",
         "hypothesis": (
-            "Removing speculative invalid arguments (such as V2 model runner and gemma4 parser) "
-            "to fix the startup crash. Setting moderate micro-batching parameters (max-num-seqs=16, "
-            "max-num-batched-tokens=4096) and Triton Attention to optimize 1-step diffusion serving."
+            "Increasing max-num-seqs to 256 prevents request queuing and concurrency starvation under high arrival rates. "
+            "Disabling chunked prefill and setting max-num-batched-tokens to 16384 maximizes prefill processing efficiency "
+            "and utilizes GPU tensor cores more effectively, while avoiding overhead from experimental V2 model runner."
         ),
         "category": "vllm_flags",  # vllm_flags | cuda_graphs | backends | triton_kernels
         "vllm_args": [
-            "nvidia/diffusiongemma-26B-A4B-it-NVFP4",
-            "--served-model-name=diffusiongemma-26b",
+            "google/gemma-4-26B-A4B-it",
+            "--served-model-name=google/gemma-4-26B-A4B-it",
             "--host=0.0.0.0",
             "--port=8080",
-            '--diffusion-config={"canvas_length": 64}',
+            "--max-model-len=8192",
             "--max-logprobs=5",
-            "--disable-uvicorn-access-log",
-            "--attention-backend=TRITON_ATTN",
-            "--max-num-seqs=16",
-            "--max-num-batched-tokens=4096",
-            "--max-model-len=12288",
-            "--gpu-memory-utilization=0.90",
+            "--gpu-memory-utilization=0.95",
+            "--language-model-only",
+            "--max-num-batched-tokens=16384",
+            "--max-num-seqs=256",
+            "--async-scheduling",
+            "--attention-backend=FLASHINFER",
             "--enable-prefix-caching",
+            "--disable-uvicorn-access-log",
         ],
         "env_vars": {
             "PYTHONUNBUFFERED": "1",
             "OMP_NUM_THREADS": "8",
             "TOKENIZERS_PARALLELISM": "true",
+            "CUDA_DEVICE_MAX_CONNECTIONS": "1",
         },
         "custom_kernel_code": "",
     }

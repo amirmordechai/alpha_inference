@@ -15,79 +15,37 @@ from typing import Any
 def get_candidate_config() -> dict[str, Any]:
     """Return the vLLM serving configuration and optional custom Triton GPU kernel."""
     return {
-        "plain_title": "Triton Softcap Fusion & Balanced Micro-Batching",
+        "plain_title": "Active Chunked Prefill at 2048 + FlashInfer",
         "hypothesis": (
-            "Keeping the custom Triton softcap fusion, but increasing the micro-batch limits to "
-            "--max-num-seqs=16 and --max-num-batched-tokens=8192. This provides better burst "
-            "absorption for 1-step diffusion compared to very tight micro-batching, while avoiding "
-            "the extreme queueing and head-of-line blocking of default over-batching."
+            "Lowering `--max-num-batched-tokens` to 2048 and `--long-prefill-token-threshold` to 1024 "
+            "ensures that chunked prefill actively splits large prefills into 2048-token chunks. This prevents "
+            "massive prefill steps from monopolizing the GPU, dramatically reducing P99 latency for ongoing decodes."
         ),
         "category": "vllm_flags",  # vllm_flags | cuda_graphs | backends | triton_kernels
         "vllm_args": [
-            "nvidia/diffusiongemma-26B-A4B-it-NVFP4",
-            "--served-model-name=diffusiongemma-26b",
+            "google/gemma-4-26B-A4B-it",
+            "--served-model-name=google/gemma-4-26B-A4B-it",
             "--host=0.0.0.0",
             "--port=8080",
-            '--diffusion-config={"canvas_length": 64}',
+            "--max-model-len=8192",
             "--max-logprobs=5",
-            "--disable-uvicorn-access-log",
-            "--attention-backend=TRITON_ATTN",
-            "--max-num-seqs=16",
-            "--max-num-batched-tokens=8192",
-            "--max-model-len=12288",
-            "--gpu-memory-utilization=0.92",
-            "--async-scheduling",
+            "--gpu-memory-utilization=0.95",
             "--enable-prefix-caching",
+            "--enable-chunked-prefill",
+            "--long-prefill-token-threshold=1024",
+            "--max-num-seqs=256",
+            "--language-model-only",
+            "--max-num-batched-tokens=2048",
+            "--disable-uvicorn-access-log",
+            "--attention-backend=FLASHINFER",
         ],
         "env_vars": {
             "PYTHONUNBUFFERED": "1",
             "OMP_NUM_THREADS": "8",
             "TOKENIZERS_PARALLELISM": "true",
             "VLLM_USE_V2_MODEL_RUNNER": "1",
+            "CUDA_DEVICE_MAX_CONNECTIONS": "1",
         },
-        "custom_kernel_code": """
-import torch
-import triton
-import triton.language as tl
-
-@triton.jit
-def fused_softcap_kernel(logits_ptr, cap, n_elements, BLOCK_SIZE: tl.constexpr):
-    pid = tl.program_id(axis=0)
-    offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = offsets < n_elements
-    x = tl.load(logits_ptr + offsets, mask=mask)
-    x_f32 = x.to(tl.float32) / cap
-    x_f32 = tl.math.tanh(x_f32) * cap
-    tl.store(logits_ptr + offsets, x_f32.to(x.dtype), mask=mask)
-
-try:
-    import vllm.model_executor.layers.logits_processor as lp
-    if not hasattr(lp.LogitsProcessor, '_original_forward_patched'):
-        lp.LogitsProcessor._original_forward_patched = lp.LogitsProcessor.forward
-        
-        def fast_forward(self, *args, **kwargs):
-            # Temporarily disable native softcapping to avoid double ops
-            cap = getattr(self, 'soft_cap', None)
-            if cap is not None:
-                self.soft_cap = None
-            
-            logits = self._original_forward_patched(*args, **kwargs)
-            
-            # Apply our fused triton kernel strictly inplace
-            if cap is not None:
-                self.soft_cap = cap
-                if not logits.is_contiguous():
-                    logits = logits.contiguous()
-                n_elements = logits.numel()
-                BLOCK_SIZE = 1024
-                grid = (triton.cdiv(n_elements, BLOCK_SIZE),)
-                fused_softcap_kernel[grid](logits, cap, n_elements, BLOCK_SIZE=BLOCK_SIZE)
-                
-            return logits
-            
-        lp.LogitsProcessor.forward = fast_forward
-except Exception:
-    pass
-""",
+        "custom_kernel_code": "",
     }
 # EVOLVE-BLOCK-END

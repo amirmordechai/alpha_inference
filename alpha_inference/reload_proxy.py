@@ -222,7 +222,7 @@ class VllmSupervisor:
                     return {"ok": False, "error": f"/stop_profile returned HTTP {r_stop.status}"}
 
         await asyncio.sleep(1.5)
-        traces = sorted(PROFILER_DIR.glob("*.json*"), key=lambda p: p.stat().st_mtime, reverse=True)
+        traces = sorted(PROFILER_DIR.rglob("*.json*"), key=lambda p: p.stat().st_mtime, reverse=True)
         if not traces:
             return {"ok": False, "error": "No trace file produced in VLLM_TORCH_PROFILER_DIR"}
 

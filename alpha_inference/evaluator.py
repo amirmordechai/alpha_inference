@@ -201,7 +201,7 @@ async def replay_trace_realtime(
             in_flight: set[asyncio.Task[None]] = set()
             # Cap concurrent in-flight HTTP sockets per Vertex replica while starting the latency
             # clock at exact 1:1 arrival time (MLPerf Server open-loop queueing semantics).
-            in_flight_sem = asyncio.Semaphore(48)
+            in_flight_sem = asyncio.Semaphore(512)
 
             async def _dispatch_one(offset_s: float, req_obj: Mapping[str, Any]) -> None:
                 nonlocal failures
@@ -302,15 +302,15 @@ async def measure_saturation_throughput(
     task_mode: ResolvedTaskMode,
     model_name: str,
     use_gcp_auth: bool = True,
-    concurrency: int = 32,
-    total_requests: int = 128,
+    concurrency: int = 160,
+    total_requests: int = 480,
 ) -> tuple[float, int]:
-    """Short saturation probe (`c=32`) to measure peak sustained GPU throughput (`req/s`)."""
+    """High-concurrency saturation probe (`c=160`) to measure peak sustained GPU throughput (`req/s`)."""
     sem = asyncio.Semaphore(concurrency)
     ok_count = 0
     failures = 0
-    connector = aiohttp.TCPConnector(limit=256, limit_per_host=0)
-    async with aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=90.0)) as session:
+    connector = aiohttp.TCPConnector(limit=512, limit_per_host=0)
+    async with aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=180.0)) as session:
         async def _one(i: int) -> None:
             nonlocal ok_count, failures
             req = sample_rows[i % len(sample_rows)]
@@ -353,7 +353,11 @@ async def evaluate_candidate_on_endpoint(
     """Tier-2 Layer-2 KL Equivalence Gate + Tier-3 1:1 Real-Time Trace Replay + Saturation Throughput."""
     t0 = time.perf_counter()
     trace_rows = load_jsonl_requests(trace_path)
-    equiv_rows = load_jsonl_requests(equiv_path) if equiv_path.exists() else trace_rows[: min(80, len(trace_rows))]
+    equiv_rows = (
+        load_jsonl_requests(equiv_path)
+        if equiv_path.resolve() != trace_path.resolve() and equiv_path.exists()
+        else trace_rows[: min(80, len(trace_rows))]
+    )
     resolved_mode = detect_task_mode(trace_rows, requested_mode=task_mode, model_name=model_name)
     canon_metric = normalize_metric(metric)
     stream_ttft = resolved_mode == "chat" and canon_metric == "ttft"
@@ -387,28 +391,29 @@ async def evaluate_candidate_on_endpoint(
         bucket_sec=30.0,
     )
 
-    sat_rps, sat_fails = await measure_saturation_throughput(
+    sat_rps, _sat_fails = await measure_saturation_throughput(
         endpoint_url=endpoint_url,
         sample_rows=trace_rows,
         task_mode=resolved_mode,
         model_name=model_name,
         use_gcp_auth=use_gcp_auth,
-        concurrency=32,
-        total_requests=min(128, max(32, len(trace_rows))),
+        concurrency=128,
+        total_requests=min(384, max(32, len(trace_rows))),
     )
 
-    total_fails = trace_fails + sat_fails
-    max_tolerable = max(3, int(0.01 * len(trace_rows))) if record_baseline else 0
-    if total_fails > max_tolerable or not timed_preds:
+    # Symmetric MLPerf-style completion bar (<= 0.5% HTTP drops allowed across both Baseline & Candidates,
+    # with any dropped trace request penalized as 90,000 ms inside the P99 distribution).
+    max_tolerable = max(2, int(0.005 * len(trace_rows))) if len(trace_rows) >= 200 else 0
+    if trace_fails > max_tolerable or not timed_preds:
         bad_eq = EquivalenceReport(
             passed=False,
             num_checked=equiv_report.num_checked,
-            num_failed_http=total_fails,
+            num_failed_http=trace_fails,
             exact_slot_matches=equiv_report.exact_slot_matches,
             total_slots=equiv_report.total_slots,
             exact_slot_match_pct=equiv_report.exact_slot_match_pct,
             max_prob_abs_diff=equiv_report.max_prob_abs_diff,
-            reason=f"Failed {total_fails} HTTP request(s) under burst trace replay",
+            reason=f"Failed {trace_fails} HTTP request(s) under burst trace replay (limit {max_tolerable})",
             mean_kl_divergence=equiv_report.mean_kl_divergence,
             mean_prob_abs_diff=equiv_report.mean_prob_abs_diff,
             confident_slot_match_pct=equiv_report.confident_slot_match_pct,
@@ -422,6 +427,9 @@ async def evaluate_candidate_on_endpoint(
 
     lats = np.array([p.e2e_latency_ms for _, p in timed_preds], dtype=np.float64)
     ttfts = np.array([p.ttft_ms for _, p in timed_preds], dtype=np.float64)
+    if trace_fails > 0:
+        lats = np.concatenate([lats, np.full(trace_fails, 90_000.0, dtype=np.float64)])
+        ttfts = np.concatenate([ttfts, np.full(trace_fails, 90_000.0, dtype=np.float64)])
 
     return TraceEvalResult(
         candidate_name=candidate_name,

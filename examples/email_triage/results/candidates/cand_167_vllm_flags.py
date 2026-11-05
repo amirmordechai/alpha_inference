@@ -15,39 +15,36 @@ from typing import Any
 def get_candidate_config() -> dict[str, Any]:
     """Return the vLLM serving configuration and optional custom Triton GPU kernel."""
     return {
-        "plain_title": "Moderate Micro-Batching with Increased Token Budget for Blackwell",
+        "plain_title": "Maximized Batched Tokens (16384) + FlashAttention",
         "hypothesis": (
-            "Increasing max-num-seqs to 24 and max-num-batched-tokens to 8192 allows better batching "
-            "of concurrent requests on the powerful Blackwell GPU, reducing queue delays while avoiding "
-            "over-batching overhead."
+            "Since TTFT dominates P99 latency (TTFT_P99 = 8.6s), the system is likely suffering from queueing delays "
+            "due to restricted prefill throughput. By drastically increasing `--max-num-batched-tokens` to 16384 and "
+            "switching to `FLASH_ATTN`, we allow multiple large prefills to execute simultaneously, crushing the queue wait time."
         ),
         "category": "vllm_flags",  # vllm_flags | cuda_graphs | backends | triton_kernels
         "vllm_args": [
-            "nvidia/diffusiongemma-26B-A4B-it-NVFP4",
-            "--served-model-name=diffusiongemma-26b",
+            "google/gemma-4-26B-A4B-it",
+            "--served-model-name=google/gemma-4-26B-A4B-it",
             "--host=0.0.0.0",
             "--port=8080",
-            '--diffusion-config={"canvas_length": 64}',
+            "--max-model-len=8192",
             "--max-logprobs=5",
-            '--override-generation-config={"max_new_tokens": null}',
-            "--enable-auto-tool-choice",
-            "--tool-call-parser=gemma4",
-            "--reasoning-parser=gemma4",
-            "--enable-prefix-caching",
-            "--async-scheduling",
-            '--limit-mm-per-prompt={"image": 0, "video": 0}',
-            "--attention-backend=TRITON_ATTN",
-            "--max-num-seqs=24",
-            "--max-num-batched-tokens=8192",
-            "--max-model-len=12288",
             "--gpu-memory-utilization=0.95",
+            "--enable-prefix-caching",
+            "--enable-chunked-prefill",
+            "--long-prefill-token-threshold=4096",
+            "--max-num-seqs=256",
+            "--language-model-only",
+            "--max-num-batched-tokens=16384",
             "--disable-uvicorn-access-log",
+            "--attention-backend=FLASH_ATTN",
         ],
         "env_vars": {
-            "VLLM_USE_V2_MODEL_RUNNER": "1",
             "PYTHONUNBUFFERED": "1",
             "OMP_NUM_THREADS": "8",
             "TOKENIZERS_PARALLELISM": "true",
+            "VLLM_USE_V2_MODEL_RUNNER": "1",
+            "CUDA_DEVICE_MAX_CONNECTIONS": "1",
         },
         "custom_kernel_code": "",
     }

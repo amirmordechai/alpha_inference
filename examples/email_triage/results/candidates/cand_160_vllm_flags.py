@@ -15,41 +15,35 @@ from typing import Any
 def get_candidate_config() -> dict[str, Any]:
     """Return the vLLM serving configuration and optional custom Triton GPU kernel."""
     return {
-        "plain_title": "Tighter Concurrency Limit with Dense CUDA Graph Ladder",
+        "plain_title": "High Concurrency and Block Alignment",
         "hypothesis": (
-            "Reducing the max-num-seqs limit from 24 to 16 restricts the maximum sequence concurrency. "
-            "This tighter limit prevents excessively large micro-batches from causing head-of-line blocking "
-            "and lowering P99 latency spikes, while preserving a dense CUDA graph capture ladder to bypass "
-            "CPU overhead."
+            "Increase max-num-seqs to 256 to eliminate queuing delay under high arrival rates. "
+            "Raise max-num-batched-tokens to 8192 to match max-model-len. "
+            "Use block-size of 32 for better GPU memory alignment and throughput on Ada architecture."
         ),
         "category": "vllm_flags",  # vllm_flags | cuda_graphs | backends | triton_kernels
         "vllm_args": [
-            "nvidia/diffusiongemma-26B-A4B-it-NVFP4",
-            "--served-model-name=diffusiongemma-26b",
+            "google/gemma-4-26B-A4B-it",
+            "--served-model-name=google/gemma-4-26B-A4B-it",
             "--host=0.0.0.0",
             "--port=8080",
-            "--disable-uvicorn-access-log",
-            '--diffusion-config={"canvas_length": 64}',
+            "--max-model-len=8192",
             "--max-logprobs=5",
-            '--override-generation-config={"max_new_tokens": null}',
-            "--enable-auto-tool-choice",
-            "--tool-call-parser=gemma4",
-            "--reasoning-parser=gemma4",
+            "--gpu-memory-utilization=0.95",
+            "--disable-uvicorn-access-log",
+            "--language-model-only",
             "--enable-prefix-caching",
+            "--attention-backend=flashinfer",
             "--async-scheduling",
-            '--limit-mm-per-prompt={"image": 0, "video": 0}',
-            "--attention-backend=TRITON_ATTN",
-            "--max-num-seqs=16",
-            "--max-num-batched-tokens=4096",
-            "--max-model-len=12288",
-            "--gpu-memory-utilization=0.90",
-            '--compilation-config={"cudagraph_capture_sizes": [1, 2, 4, 8, 12, 16, 20, 24, 32, 40, 48, 64, 80, 96, 128, 160, 192, 256, 384, 512, 768, 1024, 1536, 2048], "max_cudagraph_capture_size": 2048}',
+            "--max-num-seqs=256",
+            "--max-num-batched-tokens=8192",
+            "--long-prefill-token-threshold=2048",
+            "--block-size=32",
         ],
         "env_vars": {
-            "VLLM_USE_V2_MODEL_RUNNER": "1",
             "PYTHONUNBUFFERED": "1",
             "TOKENIZERS_PARALLELISM": "true",
-            "OMP_NUM_THREADS": "4",
+            "OMP_NUM_THREADS": "8",
         },
         "custom_kernel_code": "",
     }

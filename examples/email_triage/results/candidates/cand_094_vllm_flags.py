@@ -15,43 +15,51 @@ from typing import Any
 def get_candidate_config() -> dict[str, Any]:
     """Return the vLLM serving configuration and optional custom Triton GPU kernel."""
     return {
-        "plain_title": "Mitigate HoL blocking with V2 engine + PyTorch Inductor Freezing",
+        "plain_title": "FlashInfer Chunked Prefill & Concurrency Scaling",
         "hypothesis": (
-            "Tuning --max-num-seqs to 10 and --max-num-batched-tokens to 4096 mitigates head-of-line "
-            "blocking latency spikes under bursty traffic. Activating the V2 model runner along with "
-            "TORCHINDUCTOR_FREEZING and TORCH_INDUCTOR_REORDER_FOR_CUDA enables aggressive compiler "
-            "optimizations tailored for Blackwell GPUs, while prefix caching avoids redundant prefills."
+            "Optimize chunked prefill settings by raising long-prefill-token-threshold to 1024 and max-num-seqs to 256, "
+            "while leveraging FlashInfer, disabling Python GC to eliminate CPU pauses, and keeping GPU memory at 0.90."
         ),
         "category": "vllm_flags",  # vllm_flags | cuda_graphs | backends | triton_kernels
         "vllm_args": [
-            "nvidia/diffusiongemma-26B-A4B-it-NVFP4",
-            "--served-model-name=diffusiongemma-26b",
+            "google/gemma-4-26B-A4B-it",
+            "--served-model-name=google/gemma-4-26B-A4B-it",
             "--host=0.0.0.0",
             "--port=8080",
-            '--diffusion-config={"canvas_length": 64}',
+            "--max-model-len=8192",
             "--max-logprobs=5",
-            "--disable-uvicorn-access-log",
-            '--override-generation-config={"max_new_tokens": null}',
-            "--enable-auto-tool-choice",
-            "--tool-call-parser=gemma4",
-            "--reasoning-parser=gemma4",
-            '--limit-mm-per-prompt={"image": 0, "video": 0}',
-            "--attention-backend=TRITON_ATTN",
-            "--max-num-seqs=10",
-            "--max-num-batched-tokens=4096",
-            "--max-model-len=12288",
             "--gpu-memory-utilization=0.90",
-            "--async-scheduling",
+            "--attention-backend=flashinfer",
+            "--enable-chunked-prefill",
+            "--long-prefill-token-threshold=1024",
+            "--language-model-only",
+            "--max-num-batched-tokens=4096",
+            "--max-num-seqs=256",
             "--enable-prefix-caching",
+            "--disable-uvicorn-access-log",
         ],
         "env_vars": {
             "PYTHONUNBUFFERED": "1",
-            "OMP_NUM_THREADS": "8",
             "TOKENIZERS_PARALLELISM": "true",
+            "OMP_NUM_THREADS": "4",
+            "TORCH_NUM_THREADS": "4",
+            "CUDA_DEVICE_MAX_CONNECTIONS": "1",
             "VLLM_USE_V2_MODEL_RUNNER": "1",
-            "TORCHINDUCTOR_FREEZING": "1",
-            "TORCH_INDUCTOR_REORDER_FOR_CUDA": "1",
         },
-        "custom_kernel_code": "",
+        "custom_kernel_code": """
+import gc
+import torch
+try:
+    gc.disable()
+except Exception:
+    pass
+try:
+    torch.set_num_threads(4)
+    torch.set_num_interop_threads(1)
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+except Exception:
+    pass
+""",
     }
 # EVOLVE-BLOCK-END

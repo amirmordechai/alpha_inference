@@ -15,40 +15,49 @@ from typing import Any
 def get_candidate_config() -> dict[str, Any]:
     """Return the vLLM serving configuration and optional custom Triton GPU kernel."""
     return {
-        "plain_title": "Balanced Micro-Batching & OMP Tuning",
+        "plain_title": "Stable Execution via Block-Wise Memory Bounds & Async Scheduling",
         "hypothesis": (
-            "Increase max-num-seqs to 24 and max-num-batched-tokens to 8192 to restore "
-            "peak throughput compared to tighter limits, while maintaining strict P99 control. "
-            "Also increase OMP_NUM_THREADS to 8 to speed up host threads."
+            "Remove potentially conflicting env vars like V2_MODEL_RUNNER and explicit attention backends "
+            "that might cause engine core initialization failures. Lower GPU memory utilization to 0.90 "
+            "and limit max batched tokens to 4096 to prevent memory fragmentation and OOM. Add async "
+            "scheduling to hide CPU overhead."
         ),
         "category": "vllm_flags",  # vllm_flags | cuda_graphs | backends | triton_kernels
         "vllm_args": [
-            "nvidia/diffusiongemma-26B-A4B-it-NVFP4",
-            "--served-model-name=diffusiongemma-26b",
+            "google/gemma-4-26B-A4B-it",
+            "--served-model-name=google/gemma-4-26B-A4B-it",
             "--host=0.0.0.0",
             "--port=8080",
-            '--diffusion-config={"canvas_length": 64}',
+            "--max-model-len=8192",
             "--max-logprobs=5",
-            '--override-generation-config={"max_new_tokens": null}',
-            "--enable-auto-tool-choice",
-            "--tool-call-parser=gemma4",
-            "--reasoning-parser=gemma4",
+            "--gpu-memory-utilization=0.90",
+            "--enable-chunked-prefill",
+            "--long-prefill-token-threshold=1024",
+            "--language-model-only",
+            "--max-num-batched-tokens=4096",
+            "--max-num-seqs=128",
             "--enable-prefix-caching",
-            "--async-scheduling",
-            '--limit-mm-per-prompt={"image": 0, "video": 0}',
-            "--attention-backend=TRITON_ATTN",
-            "--max-num-seqs=24",
-            "--max-num-batched-tokens=8192",
-            "--max-model-len=12288",
-            "--gpu-memory-utilization=0.95",
             "--disable-uvicorn-access-log",
+            "--async-scheduling",
         ],
         "env_vars": {
-            "VLLM_USE_V2_MODEL_RUNNER": "1",
             "PYTHONUNBUFFERED": "1",
-            "OMP_NUM_THREADS": "8",
             "TOKENIZERS_PARALLELISM": "true",
+            "OMP_NUM_THREADS": "8",
         },
-        "custom_kernel_code": "",
+        "custom_kernel_code": """
+import gc
+import torch
+try:
+    gc.enable()
+    gc.set_threshold(50000, 500, 500)
+except Exception:
+    pass
+try:
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+except Exception:
+    pass
+""",
     }
 # EVOLVE-BLOCK-END

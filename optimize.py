@@ -105,9 +105,10 @@ class BudgetedAlphaEvolveExperiment(AlphaEvolveExperiment):
         )
         self.budget_usd = budget_usd
         self.current_spend_fn = current_spend_fn
+        self.backend_terminal = False
 
     def stopping_criteria_met(self) -> bool:
-        if super().stopping_criteria_met():
+        if self.backend_terminal or super().stopping_criteria_met():
             return True
         spent = self.current_spend_fn()
         if spent >= self.budget_usd:
@@ -123,18 +124,13 @@ def build_parser() -> argparse.ArgumentParser:
         if Path("examples/email_triage/monday_peak_3m.jsonl").exists()
         else "examples/custom_openai_chat/sample_trace.jsonl"
     )
-    default_equiv = (
-        "examples/email_triage/equivalence_golden.jsonl"
-        if Path("examples/email_triage/equivalence_golden.jsonl").exists()
-        else ""
-    )
 
     p = argparse.ArgumentParser(
         description="Optimize GenAI serving on Vertex AI or GPU VMs using official Google Cloud AlphaEvolve.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("--trace", "--data", dest="trace", default=default_trace, help="JSONL production request trace")
-    p.add_argument("--equiv-trace", default=default_equiv, help="Optional separate JSONL file for KL equivalence gate")
+    p.add_argument("--equiv-trace", default="", help="Optional separate JSONL file for KL equivalence gate (defaults to first 80 rows of --trace)")
     p.add_argument("--task-mode", choices=TASK_MODE_CHOICES, default="auto", help="auto | chat | jev_diffusion")
     p.add_argument("--model", default="", help="Optional HuggingFace model override (defaults to candidate.py)")
     p.add_argument("--served-model-name", default="", help="Optional --served-model-name override")
@@ -187,7 +183,12 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
 
     served_model = extract_flag_value(baseline_cand.vllm_args, "--served-model-name") or baseline_cand.vllm_args[0]
     trace_path = Path(args.trace)
-    equiv_path = Path(args.equiv_trace) if args.equiv_trace else trace_path
+    if args.equiv_trace:
+        equiv_path = Path(args.equiv_trace)
+    elif trace_path.name == "monday_peak_3m.jsonl" and (trace_path.parent / "equivalence_golden.jsonl").exists():
+        equiv_path = trace_path.parent / "equivalence_golden.jsonl"
+    else:
+        equiv_path = trace_path
     trace_rows = load_jsonl_requests(trace_path)
     resolved_mode = detect_task_mode(trace_rows, requested_mode=args.task_mode, model_name=baseline_cand.vllm_args[0])
     max_programs = max(2, int(args.max_programs))
@@ -327,7 +328,7 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
 
         # 2. Evaluate Ground-Zero Baseline (#0) & capture live GPU CUDA kernel profile
         _, primary_url, primary_tok = worker_pool[0]
-        if not args.deploy_vertex and primary_tok:
+        if not should_provision_workers and primary_tok:
             init_targets = worker_pool[:2] if len(worker_pool) > 1 else worker_pool[:1]
             init_rels = await asyncio.gather(
                 *(reload_endpoint(u, t, baseline_cand, use_gcp_auth=use_gcp_auth) for _, u, t in init_targets)
@@ -690,7 +691,8 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
                 "problem_description": full_problem_description,
                 "program_language": "python",
                 "run_settings": {
-                    "max_programs": max_programs,
+                    # Backend `max_programs` includes the initial seed program (#0)
+                    "max_programs": max_programs + 1,
                     "concurrency": len(worker_pool),
                 },
                 "generation_settings": {
@@ -711,17 +713,21 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
 
         async def _auto_resume_watchdog() -> None:
             while not experiment.stopping_criteria_met():
-                await asyncio.sleep(180.0)
+                await asyncio.sleep(30.0)
                 if experiment.stopping_criteria_met() or not experiment.experiment_name:
                     break
                 try:
                     info = await asyncio.to_thread(
                         ae_client.get_alpha_evolve_experiment, experiment.experiment_name
                     )
-                    st = str((info or {}).get("state", ""))
-                    if "PAUSED" in st.upper() and not experiment.stopping_criteria_met():
+                    st = str((info or {}).get("state", "")).strip().upper()
+                    if "PAUSED" in st and not experiment.stopping_criteria_met():
                         logger.warning("AlphaEvolve experiment entered PAUSED state; calling resume_experiment()...")
                         await asyncio.to_thread(experiment.resume_experiment)
+                    elif st in {"COMPLETED", "SUCCEEDED", "CANCELLED", "FAILED"}:
+                        logger.info("AlphaEvolve backend reached terminal state (%s); finishing controller loop.", st)
+                        experiment.backend_terminal = True
+                        break
                 except Exception as exc:  # noqa: BLE001
                     logger.debug("Watchdog check skipped: %s", exc)
 
@@ -729,9 +735,9 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
         try:
             await run_controller_loop(
                 experiment,
-                num_samplers=1,
+                num_samplers=min(4, max(1, len(worker_pool))),
                 num_evaluators=len(worker_pool),
-                idle_timeout_s=2400,
+                idle_timeout_s=600,
             )
         finally:
             watchdog_task.cancel()

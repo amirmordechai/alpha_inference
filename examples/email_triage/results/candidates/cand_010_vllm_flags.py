@@ -15,39 +15,27 @@ from typing import Any
 def get_candidate_config() -> dict[str, Any]:
     """Return the vLLM serving configuration and optional custom Triton GPU kernel."""
     return {
-        "plain_title": "Fast Micro-Batching & Minimal Output Overhead",
+        "plain_title": "Prefix caching and scheduler tuning",
         "hypothesis": (
-            "Reduce max-num-seqs to 8 and cap batched tokens to 4096 to prevent head-of-line "
-            "blocking under bursty arrivals. Lower max-logprobs to 5 and disable uvicorn access logs "
-            "to minimize output I/O overhead, thereby improving P99 latency."
+            "Enable prefix caching, lower max-logprobs to 5, increase gpu-memory-utilization to 0.95, "
+            "and set max-num-seqs to 256 to increase concurrency and reduce P99 queueing latency."
         ),
         "category": "vllm_flags",  # vllm_flags | cuda_graphs | backends | triton_kernels
         "vllm_args": [
-            "nvidia/diffusiongemma-26B-A4B-it-NVFP4",
-            "--served-model-name=diffusiongemma-26b",
+            "google/gemma-4-26B-A4B-it",
+            "--served-model-name=google/gemma-4-26B-A4B-it",
             "--host=0.0.0.0",
             "--port=8080",
-            '--diffusion-config={"canvas_length": 64}',
+            "--max-model-len=8192",
             "--max-logprobs=5",
-            '--override-generation-config={"max_new_tokens": null}',
-            "--enable-auto-tool-choice",
-            "--tool-call-parser=gemma4",
-            "--reasoning-parser=gemma4",
-            "--enable-prefix-caching",
-            "--async-scheduling",
-            '--limit-mm-per-prompt={"image": 0, "video": 0}',
-            "--attention-backend=TRITON_ATTN",
-            "--max-num-seqs=8",
-            "--max-num-batched-tokens=4096",
-            "--max-model-len=12288",
             "--gpu-memory-utilization=0.95",
+            "--enable-prefix-caching",
             "--disable-uvicorn-access-log",
+            "--max-num-seqs=256",
         ],
         "env_vars": {
-            "VLLM_USE_V2_MODEL_RUNNER": "1",
             "PYTHONUNBUFFERED": "1",
             "TOKENIZERS_PARALLELISM": "true",
-            "OMP_NUM_THREADS": "8",
         },
         "custom_kernel_code": "",
     }

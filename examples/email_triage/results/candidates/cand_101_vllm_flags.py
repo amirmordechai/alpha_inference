@@ -15,40 +15,36 @@ from typing import Any
 def get_candidate_config() -> dict[str, Any]:
     """Return the vLLM serving configuration and optional custom Triton GPU kernel."""
     return {
-        "plain_title": "Balanced Micro-Batching & Memory Allocation Tuning",
+        "plain_title": "FlashInfer, Chunked Prefill, Async Scheduling & High Concurrency",
         "hypothesis": (
-            "Optimize P99 latency by setting max-num-seqs to 16 and max-num-batched-tokens "
-            "to 6144 to prevent queue buildup, lowering memory utilization to 0.90 to "
-            "give PyTorch workspace headroom, and using max_split_size_mb to stop fragmentation."
+            "Combining chunked prefill (to interleave prefill and decode phases) with async "
+            "scheduling minimizes scheduler overhead. Increasing max-num-seqs to 256 "
+            "prevents queueing delays under high arrival rates, while GQA keeps KV cache memory usage low."
         ),
         "category": "vllm_flags",  # vllm_flags | cuda_graphs | backends | triton_kernels
         "vllm_args": [
-            "nvidia/diffusiongemma-26B-A4B-it-NVFP4",
-            "--served-model-name=diffusiongemma-26b",
+            "google/gemma-4-26B-A4B-it",
+            "--served-model-name=google/gemma-4-26B-A4B-it",
             "--host=0.0.0.0",
             "--port=8080",
-            '--diffusion-config={"canvas_length": 64}',
+            "--max-model-len=8192",
             "--max-logprobs=5",
-            '--override-generation-config={"max_new_tokens": null}',
-            "--enable-auto-tool-choice",
-            "--tool-call-parser=gemma4",
-            "--reasoning-parser=gemma4",
-            "--enable-prefix-caching",
+            "--gpu-memory-utilization=0.95",
+            "--language-model-only",
+            "--max-num-batched-tokens=4096",
+            "--max-num-seqs=256",
             "--async-scheduling",
-            '--limit-mm-per-prompt={"image": 0, "video": 0}',
-            "--attention-backend=TRITON_ATTN",
-            "--max-num-seqs=16",
-            "--max-num-batched-tokens=6144",
-            "--max-model-len=12288",
-            "--gpu-memory-utilization=0.90",
+            "--attention-backend=FLASHINFER",
+            "--enable-prefix-caching",
             "--disable-uvicorn-access-log",
+            "--enable-chunked-prefill",
+            "--long-prefill-token-threshold=1024",
         ],
         "env_vars": {
-            "VLLM_USE_V2_MODEL_RUNNER": "1",
             "PYTHONUNBUFFERED": "1",
             "OMP_NUM_THREADS": "8",
             "TOKENIZERS_PARALLELISM": "true",
-            "PYTORCH_CUDA_ALLOC_CONF": "max_split_size_mb:256",
+            "CUDA_DEVICE_MAX_CONNECTIONS": "1",
         },
         "custom_kernel_code": "",
     }

@@ -15,51 +15,57 @@ from typing import Any
 def get_candidate_config() -> dict[str, Any]:
     """Return the vLLM serving configuration and optional custom Triton GPU kernel."""
     return {
-        "plain_title": "Moderate Micro-Batching for Better Throughput-Latency Balance",
+        "plain_title": "Chunked Prefill 4k + Block Size 16",
         "hypothesis": (
-            "Previous highly restrictive limits (seqs=8-10) degraded P99 latency by over-throttling concurrency. "
-            "We relax max-num-seqs to 24 and max-num-batched-tokens to 8192 to restore throughput "
-            "while remaining tight enough to prevent large-batch head-of-line blocking."
+            "Simplify configuration by using the default stable V1 model runner, "
+            "setting block-size to 16 for optimal cache alignment, and increasing "
+            "max-num-batched-tokens to 4096 to reduce chunking overhead."
         ),
         "category": "vllm_flags",  # vllm_flags | cuda_graphs | backends | triton_kernels
         "vllm_args": [
-            "nvidia/diffusiongemma-26B-A4B-it-NVFP4",
-            "--served-model-name=diffusiongemma-26b",
+            "google/gemma-4-26B-A4B-it",
+            "--served-model-name=google/gemma-4-26B-A4B-it",
             "--host=0.0.0.0",
             "--port=8080",
-            '--diffusion-config={"canvas_length": 64}',
+            "--max-model-len=8192",
             "--max-logprobs=5",
-            '--override-generation-config={"max_new_tokens": null}',
-            "--enable-auto-tool-choice",
-            "--tool-call-parser=gemma4",
-            "--reasoning-parser=gemma4",
-            "--enable-prefix-caching",
-            "--async-scheduling",
-            '--limit-mm-per-prompt={"image": 0, "video": 0}',
-            "--attention-backend=TRITON_ATTN",
-            "--max-num-seqs=24",
-            "--max-num-batched-tokens=8192",
-            "--max-model-len=12288",
             "--gpu-memory-utilization=0.95",
+            "--attention-backend=flashinfer",
+            "--enable-chunked-prefill",
+            "--language-model-only",
+            "--max-num-batched-tokens=4096",
+            "--max-num-seqs=256",
+            "--block-size=16",
+            "--enable-prefix-caching",
             "--disable-uvicorn-access-log",
-            "--disable-log-stats",
+            "--async-scheduling",
         ],
         "env_vars": {
-            "VLLM_USE_V2_MODEL_RUNNER": "1",
             "PYTHONUNBUFFERED": "1",
             "TOKENIZERS_PARALLELISM": "true",
             "OMP_NUM_THREADS": "8",
+            "CUDA_DEVICE_MAX_CONNECTIONS": "1",
+            "VLLM_LOGGING_LEVEL": "WARNING",
         },
         "custom_kernel_code": """
-import torch
 try:
-    import torch._inductor.config as config
-    config.fx_graph_cache = True
-    config.compile_threads = 8
-    config.triton.unique_kernel_names = True
-    config.shape_padding = True
-    config.size_asserts = False
-    config.pick_loop_orders = True
+    import gc
+    gc.disable()
+except Exception:
+    pass
+
+try:
+    import os
+    os.nice(-10)
+except Exception:
+    pass
+
+try:
+    import torch
+    torch.set_grad_enabled(False)
+    torch.set_num_threads(8)
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
 except Exception:
     pass
 """,

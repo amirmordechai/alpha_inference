@@ -15,41 +15,35 @@ from typing import Any
 def get_candidate_config() -> dict[str, Any]:
     """Return the vLLM serving configuration and optional custom Triton GPU kernel."""
     return {
-        "plain_title": "V2 Model Runner with Moderate Micro-Batching",
+        "plain_title": "Chunked Prefill, FlashInfer and Optimized Concurrency",
         "hypothesis": (
-            "Enable VLLM_USE_V2_MODEL_RUNNER and use moderate micro-batch limits (max-num-seqs=24, "
-            "max-num-batched-tokens=8192) to balance burst absorption and step drain. Also set "
-            "long-prefill-token-threshold=8192 to prevent 1-step diffusion prompts from being split."
+            "Enable chunked prefill with a max-num-batched-tokens of 4096 to prevent prefill requests "
+            "from starving decodes and causing huge P99 latency spikes. Set max-num-seqs to 256 to "
+            "handle concurrency robustly under load, and use the highly optimized flashinfer "
+            "attention backend. Lower gpu-memory-utilization to 0.90 to guarantee safe and successful "
+            "CUDA graph capture while avoiding OOM errors under concurrent requests."
         ),
-        "category": "vllm_flags",  # vllm_flags | cuda_graphs | backends | triton_kernels
+        "category": "vllm_flags",
         "vllm_args": [
-            "nvidia/diffusiongemma-26B-A4B-it-NVFP4",
-            "--served-model-name=diffusiongemma-26b",
+            "google/gemma-4-26B-A4B-it",
+            "--served-model-name=google/gemma-4-26B-A4B-it",
             "--host=0.0.0.0",
             "--port=8080",
-            '--diffusion-config={"canvas_length": 64}',
+            "--max-model-len=8192",
             "--max-logprobs=5",
-            '--override-generation-config={"max_new_tokens": null}',
-            "--enable-auto-tool-choice",
-            "--tool-call-parser=gemma4",
-            "--reasoning-parser=gemma4",
+            "--gpu-memory-utilization=0.90",
+            "--max-num-seqs=256",
             "--enable-prefix-caching",
-            "--async-scheduling",
-            '--limit-mm-per-prompt={"image": 0, "video": 0}',
-            "--attention-backend=TRITON_ATTN",
-            "--max-num-seqs=24",
-            "--max-num-batched-tokens=8192",
-            "--long-prefill-token-threshold=8192",
-            "--max-model-len=12288",
-            "--gpu-memory-utilization=0.95",
             "--disable-uvicorn-access-log",
-            "--disable-log-stats",
+            "--enable-chunked-prefill",
+            "--max-num-batched-tokens=4096",
+            "--attention-backend=flashinfer",
         ],
         "env_vars": {
             "PYTHONUNBUFFERED": "1",
             "TOKENIZERS_PARALLELISM": "true",
             "OMP_NUM_THREADS": "8",
-            "VLLM_USE_V2_MODEL_RUNNER": "1",
+            "CUDA_DEVICE_MAX_CONNECTIONS": "1",
         },
         "custom_kernel_code": "",
     }

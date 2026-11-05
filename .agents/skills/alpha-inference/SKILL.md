@@ -45,7 +45,7 @@ Ask the user whether they already have a live Vertex AI GPU Endpoint ID:
   ```bash
   VERTEX_ENDPOINT_ID=$(gcloud ai endpoints create \
     --project=$GCP_PROJECT_ID --region=$GCP_REGION \
-    --display-name=my-vllm-endpoint --enable-dedicated-endpoint \
+    --display-name=my-vllm-endpoint \
     --format="value(name)" | awk -F/ '{print $NF}')
 
   MODEL_ID=$(gcloud ai models upload \
@@ -53,17 +53,20 @@ Ask the user whether they already have a live Vertex AI GPU Endpoint ID:
     --display-name=my-vllm-model \
     --container-image-uri=$VLLM_IMAGE_URI \
     --container-command="vllm,serve" \
-    --container-args="google/gemma-4-26B-A4B-it,--host=0.0.0.0,--port=8080,--max-model-len=8192" \
+    --container-args="google/gemma-4-26B-A4B-it,--served-model-name=google/gemma-4-26B-A4B-it,--host=0.0.0.0,--port=8080,--max-model-len=8192,--max-logprobs=16" \
+    --container-env-vars="HF_HOME=/dev/shm/hf_cache" \
+    --container-shared-memory-size-mb=81920 \
     --container-ports=8080 \
     --container-predict-route=/v1/chat/completions \
     --container-health-route=/health \
+    --container-deployment-timeout-seconds=3600 \
     --format="value(model)")
 
   gcloud ai endpoints deploy-model $VERTEX_ENDPOINT_ID \
     --project=$GCP_PROJECT_ID --region=$GCP_REGION \
     --model="$MODEL_ID" --display-name=my-vllm-model \
     --machine-type=g4-standard-48 \
-    --accelerator=accelerator-type=nvidia-rtx-pro-6000,count=1
+    --accelerator=type=nvidia-rtx-pro-6000,count=1
   ```
 
 - **Option C — Direct Ephemeral Workers (No Pre-Existing Endpoint Required):**

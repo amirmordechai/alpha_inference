@@ -15,38 +15,25 @@ from typing import Any
 def get_candidate_config() -> dict[str, Any]:
     """Return the vLLM serving configuration and optional custom Triton GPU kernel."""
     return {
-        "plain_title": "Tuned Micro-batching & Lowered Logprobs (batch 12)",
+        "plain_title": "Prefix Caching + Overhead Reduction",
         "hypothesis": (
-            "Reduce max-logprobs to 5 to eliminate vocabulary reduction overhead, set max-num-seqs to 12 "
-            "to prevent head-of-line blocking, disable uvicorn access logs, and tune CPU backends "
-            "(OMP_NUM_THREADS=8, TOKENIZERS_PARALLELISM=true) to unbottleneck host-side processing."
+            "Enabling prefix caching improves TTFT for shared prefixes. "
+            "Disabling uvicorn logs and reducing max-logprobs to 5 reduces host overhead and CPU-GPU sync time."
         ),
         "category": "vllm_flags",  # vllm_flags | cuda_graphs | backends | triton_kernels
         "vllm_args": [
-            "nvidia/diffusiongemma-26B-A4B-it-NVFP4",
-            "--served-model-name=diffusiongemma-26b",
+            "google/gemma-4-26B-A4B-it",
+            "--served-model-name=google/gemma-4-26B-A4B-it",
             "--host=0.0.0.0",
             "--port=8080",
-            '--diffusion-config={"canvas_length": 64}',
+            "--max-model-len=8192",
             "--max-logprobs=5",
-            '--override-generation-config={"max_new_tokens": null}',
-            "--enable-auto-tool-choice",
-            "--tool-call-parser=gemma4",
-            "--reasoning-parser=gemma4",
+            "--gpu-memory-utilization=0.95",
             "--enable-prefix-caching",
-            "--async-scheduling",
-            '--limit-mm-per-prompt={"image": 0, "video": 0}',
-            "--attention-backend=TRITON_ATTN",
-            "--max-num-seqs=12",
-            "--max-model-len=12288",
-            "--gpu-memory-utilization=0.90",
             "--disable-uvicorn-access-log",
         ],
         "env_vars": {
-            "VLLM_USE_V2_MODEL_RUNNER": "1",
             "PYTHONUNBUFFERED": "1",
-            "TOKENIZERS_PARALLELISM": "true",
-            "OMP_NUM_THREADS": "8",
         },
         "custom_kernel_code": "",
     }

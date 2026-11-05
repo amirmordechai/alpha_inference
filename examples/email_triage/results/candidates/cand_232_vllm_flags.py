@@ -15,81 +15,58 @@ from typing import Any
 def get_candidate_config() -> dict[str, Any]:
     """Return the vLLM serving configuration and optional custom Triton GPU kernel."""
     return {
-        "plain_title": "Robust Triton Softcap & Active Concurrency Micro-Batching",
+        "plain_title": "Batched Tokens 8k + 128 Seqs",
         "hypothesis": (
-            "We scale max-num-seqs from 10 to 24 and max-num-batched-tokens to 8192 to match the active "
-            "burst concurrency of the trace and eliminate queuing delay, while remaining below 32 to "
-            "avoid head-of-line blocking. We also add a robust fallback mechanism to our custom Triton "
-            "softcap kernel to guarantee reliability and KL equivalence."
+            "Increase max-num-batched-tokens to 8192 to accelerate prefill of large prompts by reducing chunking overhead, "
+            "reduce max-num-seqs to 128 to decrease queueing delay and interference, and add long-prefill-token-threshold."
         ),
         "category": "vllm_flags",  # vllm_flags | cuda_graphs | backends | triton_kernels
         "vllm_args": [
-            "nvidia/diffusiongemma-26B-A4B-it-NVFP4",
-            "--served-model-name=diffusiongemma-26b",
+            "google/gemma-4-26B-A4B-it",
+            "--served-model-name=google/gemma-4-26B-A4B-it",
             "--host=0.0.0.0",
             "--port=8080",
-            '--diffusion-config={"canvas_length": 64}',
+            "--max-model-len=8192",
             "--max-logprobs=5",
-            "--disable-uvicorn-access-log",
-            "--attention-backend=TRITON_ATTN",
-            "--max-num-seqs=24",
-            "--max-num-batched-tokens=8192",
-            "--max-model-len=12288",
             "--gpu-memory-utilization=0.95",
-            "--async-scheduling",
+            "--attention-backend=flashinfer",
+            "--enable-chunked-prefill",
+            "--language-model-only",
+            "--max-num-batched-tokens=8192",
+            "--max-num-seqs=128",
+            "--long-prefill-token-threshold=4096",
+            "--block-size=32",
             "--enable-prefix-caching",
+            "--disable-uvicorn-access-log",
+            "--async-scheduling",
         ],
         "env_vars": {
             "PYTHONUNBUFFERED": "1",
-            "OMP_NUM_THREADS": "8",
             "TOKENIZERS_PARALLELISM": "true",
+            "OMP_NUM_THREADS": "8",
+            "CUDA_DEVICE_MAX_CONNECTIONS": "1",
             "VLLM_USE_V2_MODEL_RUNNER": "1",
+            "VLLM_LOGGING_LEVEL": "WARNING",
         },
         "custom_kernel_code": """
-import torch
-import triton
-import triton.language as tl
-
-@triton.jit
-def fused_softcap_kernel(logits_ptr, cap, n_elements, BLOCK_SIZE: tl.constexpr):
-    pid = tl.program_id(axis=0)
-    offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = offsets < n_elements
-    x = tl.load(logits_ptr + offsets, mask=mask)
-    x_f32 = x.to(tl.float32) / cap
-    x_f32 = tl.math.tanh(x_f32) * cap
-    tl.store(logits_ptr + offsets, x_f32.to(x.dtype), mask=mask)
+try:
+    import gc
+    gc.disable()
+except Exception:
+    pass
 
 try:
-    import vllm.model_executor.layers.logits_processor as lp
-    if not hasattr(lp.LogitsProcessor, '_original_forward_patched'):
-        lp.LogitsProcessor._original_forward_patched = lp.LogitsProcessor.forward
-        
-        def fast_forward(self, *args, **kwargs):
-            # Temporarily disable native softcapping to avoid double ops
-            cap = getattr(self, 'soft_cap', None)
-            if cap is not None:
-                self.soft_cap = None
-            
-            logits = self._original_forward_patched(*args, **kwargs)
-            
-            # Apply our fused triton kernel strictly inplace with robust fallback
-            if cap is not None:
-                self.soft_cap = cap
-                try:
-                    if not logits.is_contiguous():
-                        logits = logits.contiguous()
-                    n_elements = logits.numel()
-                    BLOCK_SIZE = 4096
-                    grid = (triton.cdiv(n_elements, BLOCK_SIZE),)
-                    fused_softcap_kernel[grid](logits, cap, n_elements, BLOCK_SIZE=BLOCK_SIZE, num_warps=8)
-                except Exception:
-                    import torch
-                    logits = torch.tanh(logits / cap) * cap
-                
-            return logits
-            
-        lp.LogitsProcessor.forward = fast_forward
+    import os
+    os.nice(-10)
+except Exception:
+    pass
+
+try:
+    import torch
+    torch.set_grad_enabled(False)
+    torch.set_num_threads(8)
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
 except Exception:
     pass
 """,

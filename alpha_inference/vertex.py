@@ -6,6 +6,7 @@ import base64
 import difflib
 import json
 import os
+import re
 import secrets
 import shlex
 import subprocess
@@ -36,9 +37,10 @@ def load_candidate_file(config_path: str | Path) -> CandidateSpec:
 def format_candidate_diff(baseline_path: str | Path, candidate_path: str | Path) -> str:
     b_lines = Path(baseline_path).read_text(encoding="utf-8").splitlines(keepends=True)
     e_lines = Path(candidate_path).read_text(encoding="utf-8").splitlines(keepends=True)
-    return "".join(
+    diff = "".join(
         difflib.unified_diff(b_lines, e_lines, fromfile=str(baseline_path), tofile=str(candidate_path))
     )
+    return diff or f"--- {baseline_path}\n+++ {candidate_path}\n# (Identical to baseline)\n"
 
 
 def ensure_ar_image_mirrored(
@@ -57,6 +59,8 @@ def ensure_ar_image_mirrored(
     cred_path = gcloud_env.get("GOOGLE_APPLICATION_CREDENTIALS", "")
     if cred_path:
         gcloud_env["CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE"] = cred_path
+    if gcloud_env.get("GOOGLE_API_USE_CLIENT_CERTIFICATE", "").lower() == "false":
+        gcloud_env["CLOUDSDK_CONTEXT_AWARE_USE_CLIENT_CERTIFICATE"] = "false"
 
     img_check = subprocess.run(
         [
@@ -210,11 +214,28 @@ def inspect_vertex_endpoint(project_id: str, region: str, endpoint_id: str) -> d
     }
 
 
+def recommend_shared_memory_mb(machine_type: str) -> int:
+    """Estimate safe `/dev/shm` reservation (~43% of host RAM) so 25B-70B+ checkpoints cache in RAM without overflowing Vertex's ~50 GiB container overlay."""
+    mt = (machine_type or "").strip().lower()
+    host_ram_gb = 64
+    m_std = re.search(r"-standard-(\d+)$", mt)
+    m_high = re.search(r"^(a2|a3)-(highgpu|ultragpu|megagpu)-(\d+)g$", mt)
+    if m_std:
+        host_ram_gb = int(m_std.group(1)) * 4
+    elif m_high:
+        fam, tier, gpus = m_high.group(1), m_high.group(2), int(m_high.group(3))
+        per_gpu_gb = 234 if fam == "a3" else (170 if tier == "ultragpu" else 85)
+        host_ram_gb = gpus * per_gpu_gb
+    shm_mb = int((host_ram_gb * 1024 * 0.43) // 1024) * 1024
+    return max(8192, min(shm_mb, 524288))
+
+
 def build_container_launch_spec(
     cand: CandidateSpec,
     *,
     hot_reload: bool = False,
     admin_token: str = "",
+    shared_memory_mb: int = 0,
 ) -> tuple[list[str], list[str], dict[str, str], str]:
     """Build Vertex container `command`, `args`, `env`, and optional hot-reload admin token."""
     hf_token = os.environ.get("HF_TOKEN", "").strip()
@@ -226,7 +247,7 @@ def build_container_launch_spec(
                 "vllm_args": cand.vllm_args,
                 "env_vars": cand.env_vars,
                 "custom_kernel_code": cand.custom_kernel_code,
-                "startup_timeout_sec": 900.0,
+                "startup_timeout_sec": 1500.0,
             }
         )
         env = {
@@ -235,6 +256,8 @@ def build_container_launch_spec(
             "AE_INITIAL_SPEC_JSON": init_spec,
             "PYTHONUNBUFFERED": "1",
         }
+        if shared_memory_mb >= 65536:
+            env["HF_HOME"] = "/dev/shm/hf_cache"
         if hf_token:
             env["HF_TOKEN"] = hf_token
         bootstrap = (
@@ -245,6 +268,8 @@ def build_container_launch_spec(
         return ["bash", "-lc", bootstrap], [], env, tok
 
     env = dict(cand.env_vars)
+    if shared_memory_mb >= 65536:
+        env.setdefault("HF_HOME", "/dev/shm/hf_cache")
     if hf_token:
         env["HF_TOKEN"] = hf_token
 
@@ -290,7 +315,8 @@ def deploy_vertex_worker_or_endpoint(
     else:
         ar_image_uri = ensure_ar_image_mirrored(project_id, region, ar_repo, upstream_image=upstream_image)
 
-    cmd, args, env, admin_token = build_container_launch_spec(cand, hot_reload=hot_reload)
+    shm_mb = recommend_shared_memory_mb(machine_type)
+    cmd, args, env, admin_token = build_container_launch_spec(cand, hot_reload=hot_reload, shared_memory_mb=shm_mb)
     model = aiplatform.Model.upload(
         display_name=f"{display_name}-model",
         serving_container_image_uri=ar_image_uri,
@@ -300,6 +326,8 @@ def deploy_vertex_worker_or_endpoint(
         serving_container_ports=[8080],
         serving_container_predict_route="/v1/chat/completions",
         serving_container_health_route="/health",
+        serving_container_deployment_timeout=3600,
+        serving_container_shared_memory_size_mb=shm_mb,
     )
 
     last_exc: Exception | None = None
@@ -354,7 +382,7 @@ def deploy_vertex_worker_or_endpoint(
         "chat_completions_url": (
             f"https://{dns}/v1/projects/{project_id}/locations/{region}/endpoints/{endpoint.name}:rawPredict"
             if dns
-            else ""
+            else f"https://{region}-aiplatform.googleapis.com/v1/projects/{project_id}/locations/{region}/endpoints/{endpoint.name}:rawPredict"
         ),
         "machine_type": machine_type,
         "accelerator_type": accelerator_type,
@@ -373,12 +401,36 @@ def teardown_endpoint(project_id: str, region: str, endpoint_id: str) -> None:
     from google.cloud import aiplatform
 
     aiplatform.init(project=project_id, location=region)
-    ep = aiplatform.Endpoint(endpoint_name=endpoint_id)
-    model_names = [dm.model for dm in ep.gca_resource.deployed_models]
-    if ep.gca_resource.deployed_models:
-        ep.undeploy_all(sync=True)
-    ep.delete(sync=True)
-    for m_res in set(model_names):
+    model_names: set[str] = set()
+    deadline = time.time() + 900.0
+    last_exc: Exception | None = None
+    while time.time() < deadline:
+        try:
+            ep = aiplatform.Endpoint(endpoint_name=endpoint_id)
+        except Exception:  # noqa: BLE001
+            break
+        for dm in ep.gca_resource.deployed_models:
+            if dm.model:
+                model_names.add(dm.model)
+        try:
+            if ep.gca_resource.deployed_models:
+                ep.undeploy_all(sync=True)
+            ep.delete(sync=True)
+            last_exc = None
+            break
+        except Exception as exc:  # noqa: BLE001
+            msg = str(exc)
+            if "other operations running on the Endpoint" in msg or "FailedPrecondition" in msg:
+                last_exc = exc
+                time.sleep(20.0)
+                continue
+            if "NotFound" in msg or "404" in msg:
+                last_exc = None
+                break
+            raise
+    if last_exc is not None:
+        raise last_exc
+    for m_res in model_names:
         try:
             aiplatform.Model(model_name=m_res).delete(sync=True)
         except Exception:  # noqa: BLE001
@@ -397,12 +449,13 @@ def build_gcloud_rollout_command(
     accelerator_count: int = ACCELERATOR_COUNT,
 ) -> str:
     """Generate native `gcloud ai models upload` + `gcloud ai endpoints deploy-model` commands for any winner."""
-    cmd, vllm_args, env, _ = build_container_launch_spec(cand, hot_reload=False)
+    shm_mb = recommend_shared_memory_mb(machine_type)
+    cmd, vllm_args, env, _ = build_container_launch_spec(cand, hot_reload=False, shared_memory_mb=shm_mb)
     cmd_csv = ",".join(cmd)
     args_csv = "^||^" + "||".join(vllm_args)
     env_pairs = [f"{k}={v}" for k, v in env.items() if k != "HF_TOKEN"]
     env_flag = f" \\\n  --container-env-vars={shlex.quote('^||^' + '||'.join(env_pairs))}" if env_pairs else ""
-    accel_flag = f"accelerator-type={accelerator_type.lower().replace('_', '-')},count={accelerator_count}"
+    accel_flag = f"type={accelerator_type.lower().replace('_', '-')},count={accelerator_count}"
 
     return (
         "# Roll out the AlphaEvolve winning configuration using native Vertex AI (`gcloud ai`) CLI:\n"
@@ -417,6 +470,8 @@ def build_gcloud_rollout_command(
         "  --container-ports=8080 \\\n"
         "  --container-predict-route=/v1/chat/completions \\\n"
         "  --container-health-route=/health \\\n"
+        f"  --container-shared-memory-size-mb={shm_mb} \\\n"
+        "  --container-deployment-timeout-seconds=3600 \\\n"
         "  --format='value(model)' --quiet)\n\n"
         "gcloud ai endpoints deploy-model "
         f"{endpoint_id} \\\n"
@@ -429,3 +484,4 @@ def build_gcloud_rollout_command(
         "  --min-replica-count=1 --max-replica-count=1 \\\n"
         "  --traffic-split=0=100 --quiet\n"
     )
+

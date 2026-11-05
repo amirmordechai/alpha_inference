@@ -42,7 +42,7 @@ def test_seed_candidate_has_official_evolve_block() -> None:
     cand = parse_candidate_code(seed_src, name="seed")
     ok, msg = validate_candidate_spec(cand, cand)
     assert ok, msg
-    assert cand.vllm_args[0] == "nvidia/diffusiongemma-26B-A4B-it-NVFP4"
+    assert cand.vllm_args[0] == "google/gemma-4-26B-A4B-it"
 
 
 def test_candidate_validation_rejects_cheating_and_unsafe_kernels() -> None:
@@ -91,7 +91,12 @@ def test_monday_and_tuesday_traces_are_disjoint_and_realtime_timed() -> None:
     eq_ids = {r["request_id"] for r in eq}
     assert len(mon_ids & tue_ids) == 0
     assert len(eq_ids & tue_ids) == 0
-    assert detect_task_mode(mon) == "jev_diffusion"
+    assert len(mon_ids & eq_ids) == 0
+    assert detect_task_mode(mon) == "chat"
+
+    # Anti-cache-bias guarantee: 0% recycled user emails within or across Monday, Tuesday, and Golden
+    all_user_payloads = [r["messages"][1]["content"] for r in (*mon, *tue, *eq)]
+    assert len(all_user_payloads) == len(set(all_user_payloads)), "Duplicate user payload found across traces!"
 
     mon_ts = [parse_timestamp_sec(r["timestamp"]) for r in mon]
     tue_ts = [parse_timestamp_sec(r["timestamp"]) for r in tue]
@@ -237,7 +242,7 @@ def test_cli_dry_runs_and_hardware_agnostic_gcloud_rollout() -> None:
     )
     assert "gcloud ai models upload" in gcloud_cmd
     assert "gcloud ai endpoints deploy-model 999888777" in gcloud_cmd
-    assert "accelerator-type=nvidia-tesla-a100,count=1" in gcloud_cmd
+    assert "type=nvidia-tesla-a100,count=1" in gcloud_cmd
 
 
 def test_coding_agent_onboarding_skill_present() -> None:
@@ -277,6 +282,8 @@ def test_live_e2e_skill_workflow_with_native_gcloud_endpoint() -> None:
     gcloud_env = os.environ.copy()
     if gcloud_env.get("GOOGLE_APPLICATION_CREDENTIALS"):
         gcloud_env["CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE"] = gcloud_env["GOOGLE_APPLICATION_CREDENTIALS"]
+    if gcloud_env.get("GOOGLE_API_USE_CLIENT_CERTIFICATE", "").lower() == "false":
+        gcloud_env["CLOUDSDK_CONTEXT_AWARE_USE_CLIENT_CERTIFICATE"] = "false"
 
     image_uri = f"{region}-docker.pkg.dev/{project_id}/{ar_repo}/vllm-openai:v0.31.0"
     created_endpoint_id = ""
@@ -310,7 +317,6 @@ def test_live_e2e_skill_workflow_with_native_gcloud_endpoint() -> None:
                     f"--project={project_id}",
                     f"--region={region}",
                     "--display-name=ae-live-e2e-test",
-                    "--enable-dedicated-endpoint",
                     "--format=value(name)",
                     "--quiet",
                 ],
@@ -333,10 +339,13 @@ def test_live_e2e_skill_workflow_with_native_gcloud_endpoint() -> None:
                     "--display-name=ae-live-e2e-model",
                     f"--container-image-uri={image_uri}",
                     "--container-command=vllm,serve",
-                    f"--container-args={model_id_hf},--host=0.0.0.0,--port=8080,--max-model-len=8192,--max-logprobs=16",
+                    f"--container-args={model_id_hf},--served-model-name={model_id_hf},--host=0.0.0.0,--port=8080,--max-model-len=8192,--max-logprobs=16,--gpu-memory-utilization=0.90",
+                    "--container-env-vars=HF_HOME=/dev/shm/hf_cache",
+                    "--container-shared-memory-size-mb=81920",
                     "--container-ports=8080",
                     "--container-predict-route=/v1/chat/completions",
                     "--container-health-route=/health",
+                    "--container-deployment-timeout-seconds=3600",
                     "--format=value(model)",
                     "--quiet",
                 ],
@@ -359,7 +368,7 @@ def test_live_e2e_skill_workflow_with_native_gcloud_endpoint() -> None:
                     f"--model={uploaded_model_id}",
                     "--display-name=ae-live-e2e-model",
                     f"--machine-type={machine_type}",
-                    f"--accelerator=accelerator-type={accel_type},count=1",
+                    f"--accelerator=type={accel_type},count=1",
                     "--min-replica-count=1",
                     "--max-replica-count=1",
                     "--quiet",

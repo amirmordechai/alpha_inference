@@ -130,10 +130,8 @@ def build_seed_program_source(model_override: str = "", served_model_name: str =
         f"--served-model-name={served}",
         "--host=0.0.0.0",
         "--port=8080",
-        "--max-logprobs=16",
-        "--enable-prefix-caching",
-        "--max-num-seqs=16",
         "--max-model-len=8192",
+        "--max-logprobs=16",
         "--gpu-memory-utilization=0.90",
     ]
     return (
@@ -143,8 +141,8 @@ def build_seed_program_source(model_override: str = "", served_model_name: str =
         "# IMPORTANT: Keep the function name `get_candidate_config` and return dict keys unchanged.\n"
         "def get_candidate_config() -> dict[str, Any]:\n"
         "    return {\n"
-        '        "plain_title": "Out-of-the-box vLLM defaults (batch 16)",\n'
-        f'        "hypothesis": "Ground-Zero baseline for {model_override.strip()}",\n'
+        '        "plain_title": "Out-of-the-box vLLM defaults",\n'
+        f'        "hypothesis": "Ground-Zero out-of-the-box vLLM configuration for {model_override.strip()}",\n'
         '        "category": "vllm_flags",\n'
         f'        "vllm_args": {pprint.pformat(vllm_args, indent=12)},\n'
         '        "env_vars": {"PYTHONUNBUFFERED": "1"},\n'
@@ -250,7 +248,7 @@ async def reload_endpoint(
     admin_token: str,
     cand: CandidateSpec,
     use_gcp_auth: bool = True,
-    startup_timeout_sec: float = 420.0,
+    startup_timeout_sec: float = 540.0,
 ) -> dict[str, Any]:
     """Hot-swap `vLLM` flags, env vars, and custom Triton kernels in ~50-65s."""
     url = resolve_completions_url(endpoint_url)
@@ -446,6 +444,15 @@ def plot_progress_chart(tsv_path: Path, out_png: Path, metric: str = "p99_latenc
     if not xs_all:
         return
 
+    base_val = ys_keep[0] if ys_keep else ys_all[0]
+    best_val = ys_keep[-1] if ys_keep else min(ys_all)
+    if not maximize and base_val > 0:
+        y_cap = max(base_val * 1.22, best_val * 1.30)
+        ys_plot = [min(y, y_cap) for y in ys_all]
+    else:
+        y_cap = max(ys_all) * 1.15
+        ys_plot = list(ys_all)
+
     fig, ax = plt.subplots(figsize=(10.5, 5.2), dpi=180)
     fig.patch.set_facecolor("#ffffff")
     ax.set_facecolor("#ffffff")
@@ -453,25 +460,31 @@ def plot_progress_chart(tsv_path: Path, out_png: Path, metric: str = "p99_latenc
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
 
-    ax.scatter(xs_all, ys_all, s=28, color="#cbd5e1", alpha=0.8, label="Evaluated candidates", zorder=2)
+    ax.scatter(xs_all, ys_plot, s=28, color="#cbd5e1", alpha=0.8, label="Evaluated candidates", zorder=2)
     if xs_keep:
         step_x = [*xs_keep, max(xs_all)] if max(xs_all) > xs_keep[-1] else xs_keep
         step_y = [*ys_keep, ys_keep[-1]] if max(xs_all) > xs_keep[-1] else ys_keep
         ax.step(step_x, step_y, where="post", linewidth=2.4, color="#16a34a", label="Best frontier", zorder=3)
         ax.scatter(xs_keep, ys_keep, s=68, color="#16a34a", edgecolors="white", linewidths=1.2, zorder=4)
+        tiers = [26, -24, 42, -38, 24, -22, 36]
         for idx, (xk, yk, tk, ck) in enumerate(zip(xs_keep, ys_keep, titles_keep, cats_keep)):
             if idx == 0 or idx == len(xs_keep) - 1 or len(xs_keep) <= 7:
                 tag = "Kernel: " if ck == "triton_kernels" else ""
-                offset_y = 10 if idx % 2 == 0 else -14
+                short_tk = tk if len(tk) <= 34 else tk[:32].rstrip() + "…"
+                offset_y = tiers[idx % len(tiers)]
                 ax.annotate(
-                    f"{tag}{tk}",
+                    f"#{xk}: {tag}{short_tk}",
                     (xk, yk),
                     textcoords="offset points",
-                    xytext=(4, offset_y),
-                    fontsize=8.2,
+                    xytext=(2, offset_y),
+                    fontsize=8.0,
                     fontweight="bold" if idx == len(xs_keep) - 1 else "normal",
                     color="#0f172a",
+                    arrowprops={"arrowstyle": "-", "color": "#94a3b8", "lw": 0.8},
                 )
+
+    if not maximize and base_val > 0:
+        ax.set_ylim(best_val * 0.94, y_cap * 1.03)
 
     ax.set_xlabel("AlphaEvolve Candidate Evaluation #", fontsize=10.5, fontweight="bold")
     ax.set_ylabel(f"{METRIC_INFO[m]['label']} ({METRIC_INFO[m]['unit']})", fontsize=10.5, fontweight="bold")

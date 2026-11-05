@@ -10,6 +10,7 @@ Supports two built-in request modes:
 
 from __future__ import annotations
 
+import gzip
 import json
 import math
 import time
@@ -123,21 +124,26 @@ class ParsedChatResponse:
 ParsedResponse = ParsedJevResponse | ParsedChatResponse
 
 
-def load_jsonl_requests(path: Path) -> list[dict[str, Any]]:
-    """Load JSONL request rows, assigning deterministic `request_id` if omitted."""
+def load_jsonl_requests(path: Path | str) -> list[dict[str, Any]]:
+    """Load JSONL (or `.jsonl.gz`) request rows, assigning deterministic `request_id` if omitted."""
+    p = Path(path)
+    if not p.exists() and Path(f"{p}.gz").exists():
+        p = Path(f"{p}.gz")
     rows: list[dict[str, Any]] = []
-    for idx, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-        stripped = line.strip()
-        if not stripped:
-            continue
-        obj = json.loads(stripped)
-        if not isinstance(obj, dict):
-            raise ValueError(f"Expected JSON object on line {idx} of {path}")
-        if not obj.get("request_id"):
-            obj = {"request_id": f"req-{idx:05d}", **obj}
-        rows.append(obj)
+    opener = gzip.open if p.suffix == ".gz" else open
+    with opener(p, "rt", encoding="utf-8") as fh:
+        for idx, line in enumerate(fh, start=1):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            obj = json.loads(stripped)
+            if not isinstance(obj, dict):
+                raise ValueError(f"Expected JSON object on line {idx} of {p}")
+            if not obj.get("request_id"):
+                obj = {"request_id": f"req-{idx:05d}", **obj}
+            rows.append(obj)
     if not rows:
-        raise ValueError(f"No request rows found in {path}")
+        raise ValueError(f"No request rows found in {p}")
     return rows
 
 
@@ -398,6 +404,9 @@ def build_chat_payload(
         "max_tokens": max_tokens,
         "temperature": 0.0 if for_equivalence else float(req.get("temperature", 0.0)),
     }
+    for opt_key in ("chat_template_kwargs", "top_p", "presence_penalty", "frequency_penalty", "stop", "response_format"):
+        if opt_key in req:
+            payload[opt_key] = req[opt_key]
     if for_equivalence:
         payload["logprobs"] = True
         payload["top_logprobs"] = int(req.get("top_logprobs", 5))
@@ -539,7 +548,7 @@ async def send_one_chat_request(
                 headers=headers,
                 timeout=aiohttp.ClientTimeout(total=timeout_sec),
             ) as resp:
-                if resp.status in (429, 502, 503, 504) and attempt + 1 < max_retries:
+                if resp.status in (429, 500, 502, 503, 504) and attempt + 1 < max_retries:
                     err_body = (await resp.text())[:180]
                     last_err = RuntimeError(f"HTTP {resp.status}: {err_body}")
                     await asyncio.sleep(0.22 * (1.8 ** attempt) + random.uniform(0.0, 0.08))
@@ -563,7 +572,7 @@ async def send_one_chat_request(
                 data = await resp.json(content_type=None)
                 e2e_ms = (time.perf_counter() - t0) * 1000.0
                 return parse_chat_response(req_id, data, e2e_ms)
-        except (aiohttp.ClientOSError, aiohttp.ServerDisconnectedError, asyncio.TimeoutError) as exc:
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             last_err = exc
             if attempt + 1 >= max_retries:
                 raise
@@ -580,7 +589,7 @@ async def send_one_request(
     task_mode: ResolvedTaskMode = "jev_diffusion",
     model_name: str = SERVED_MODEL_NAME,
     bearer_token: str | None = None,
-    timeout_sec: float = 90.0,
+    timeout_sec: float = 120.0,
     for_equivalence: bool = False,
     stream_ttft: bool = False,
 ) -> ParsedResponse:

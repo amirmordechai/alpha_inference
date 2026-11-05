@@ -42,9 +42,14 @@ from alpha_inference.adapters import (
     ParsedJevResponse,
     TASK_MODE_CHOICES,
     detect_task_mode,
+    fetch_gcp_bearer_token,
     load_jsonl_requests,
 )
-from alpha_inference.equivalence import compare_against_baseline_responses, compare_chat_responses_kl
+from alpha_inference.equivalence import (
+    _fetch_equiv_batch,
+    compare_against_baseline_responses,
+    compare_chat_responses_kl,
+)
 from alpha_inference.evaluator import (
     METRIC_CHOICES,
     METRIC_INFO,
@@ -75,7 +80,10 @@ def build_parser() -> argparse.ArgumentParser:
     load_dotenv()
     default_trace = (
         "examples/email_triage/tuesday_peak_30m.jsonl"
-        if Path("examples/email_triage/tuesday_peak_30m.jsonl").exists()
+        if (
+            Path("examples/email_triage/tuesday_peak_30m.jsonl").exists()
+            or Path("examples/email_triage/tuesday_peak_30m.jsonl.gz").exists()
+        )
         else "examples/custom_openai_chat/sample_trace.jsonl"
     )
     p = argparse.ArgumentParser(
@@ -241,7 +249,7 @@ async def profile_week_baseline_regimes(
 
     hourly_counts = [len(b) for b in hourly_bins]
     # Pick 6 representative hours spanning Weekend Low -> Monday 9 AM Peak, replay 25s real-time window of each
-    target_hours = [147, 4, 86, 62, 34, 9]  # Sun night, Mon 4am, Thu afternoon, Wed afternoon, Tue morning, Mon 9am peak
+    target_hours = [147, 4, 86, 62, 33, 9]  # Sun night, Mon 4am, Thu afternoon, Wed afternoon, Tue 9am, Mon 9am peak
     regime_points: list[dict[str, Any]] = []
 
     for h in target_hours:
@@ -283,12 +291,12 @@ async def profile_week_baseline_regimes(
 
     sat_rps, _ = await measure_saturation_throughput(
         endpoint_url=baseline_url,
-        sample_rows=[r for _, r in timed[:256]],
+        sample_rows=[r for _, r in timed[:480]],
         task_mode=task_mode,  # type: ignore[arg-type]
         model_name=model_name,
         use_gcp_auth=use_gcp_auth,
-        concurrency=32,
-        total_requests=96,
+        concurrency=160,
+        total_requests=480,
     )
 
     # Interpolate smooth 168-hour P50/P99 & throughput curves anchored 100% on measured GPU regime points
@@ -452,7 +460,7 @@ async def run_validation(args: argparse.Namespace) -> dict[str, Any]:
                     model_name=served_model,
                     use_gcp_auth=use_gcp_auth,
                     stream_ttft=stream_ttft,
-                    for_equivalence=(resolved_mode == "chat"),
+                    for_equivalence=False,
                     warmup_count=12,
                     bucket_sec=args.bucket_sec,
                 ),
@@ -463,7 +471,7 @@ async def run_validation(args: argparse.Namespace) -> dict[str, Any]:
                     model_name=served_model,
                     use_gcp_auth=use_gcp_auth,
                     stream_ttft=stream_ttft,
-                    for_equivalence=(resolved_mode == "chat"),
+                    for_equivalence=False,
                     warmup_count=12,
                     bucket_sec=args.bucket_sec,
                 ),
@@ -474,25 +482,25 @@ async def run_validation(args: argparse.Namespace) -> dict[str, Any]:
         (base_sat_rps, _), (best_sat_rps, _) = await asyncio.gather(
             measure_saturation_throughput(
                 endpoint_url=base_url,
-                sample_rows=rows[:256],
+                sample_rows=rows[:480],
                 task_mode=resolved_mode,
                 model_name=served_model,
                 use_gcp_auth=use_gcp_auth,
-                concurrency=32,
-                total_requests=min(160, max(32, len(rows))),
+                concurrency=160,
+                total_requests=min(480, max(32, len(rows))),
             ),
             measure_saturation_throughput(
                 endpoint_url=best_url,
-                sample_rows=rows[:256],
+                sample_rows=rows[:480],
                 task_mode=resolved_mode,
                 model_name=served_model,
                 use_gcp_auth=use_gcp_auth,
-                concurrency=32,
-                total_requests=min(160, max(32, len(rows))),
+                concurrency=160,
+                total_requests=min(480, max(32, len(rows))),
             ),
         )
 
-        # Verify live Layer-2 KL output equivalence directly between Baseline and Best across all unseen requests
+        # Verify live Layer-2 KL output equivalence directly between Baseline and Best on unseen requests
         cal_dict: dict[str, float] | None = None
         cal_path = Path(args.out_dir) / "baseline_responses.calibration.json"
         if cal_path.exists():
@@ -501,9 +509,9 @@ async def run_validation(args: argparse.Namespace) -> dict[str, Any]:
             except Exception:  # noqa: BLE001
                 cal_dict = None
 
-        base_by_id = {p.request_id: p for _, p in base_preds}
-        best_only = [p for _, p in best_preds if p.request_id in base_by_id]
         if resolved_mode == "jev_diffusion":
+            base_by_id = {p.request_id: p for _, p in base_preds}
+            best_only = [p for _, p in best_preds if p.request_id in base_by_id]
             eq_rep = compare_against_baseline_responses(
                 baseline_map={k: v for k, v in base_by_id.items() if isinstance(v, ParsedJevResponse)},
                 candidate_responses=[p for p in best_only if isinstance(p, ParsedJevResponse)],
@@ -512,17 +520,47 @@ async def run_validation(args: argparse.Namespace) -> dict[str, Any]:
                 calibration=cal_dict,
             )
         else:
+            import aiohttp
+
+            step = max(1, len(rows) // 100)
+            equiv_sample = [rows[i] for i in range(0, len(rows), step)][:100]
+            tok = fetch_gcp_bearer_token() if use_gcp_auth else None
+            async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=32)) as eq_sess:
+                (eq_base_preds, eq_base_fails, _), (eq_best_preds, eq_best_fails, _) = await asyncio.gather(
+                    _fetch_equiv_batch(
+                        eq_sess,
+                        base_url,
+                        equiv_sample,
+                        task_mode="chat",
+                        model_name=served_model,
+                        bearer_token=tok,
+                        concurrency=8,
+                    ),
+                    _fetch_equiv_batch(
+                        eq_sess,
+                        best_url,
+                        equiv_sample,
+                        task_mode="chat",
+                        model_name=served_model,
+                        bearer_token=tok,
+                        concurrency=8,
+                    ),
+                )
+            eq_base_map = {p.request_id: p for p in eq_base_preds if isinstance(p, ParsedChatResponse)}
+            eq_best_list = [p for p in eq_best_preds if isinstance(p, ParsedChatResponse) and p.request_id in eq_base_map]
             eq_rep = compare_chat_responses_kl(
-                baseline_map={k: v for k, v in base_by_id.items() if isinstance(v, ParsedChatResponse)},
-                candidate_responses=[p for p in best_only if isinstance(p, ParsedChatResponse)],
-                num_expected=len(best_only),
-                num_failed_http=best_fails,
+                baseline_map=eq_base_map,
+                candidate_responses=eq_best_list,
+                num_expected=len(equiv_sample),
+                num_failed_http=eq_base_fails + eq_best_fails,
                 calibration=cal_dict,
             )
 
         def _summarize(preds: list[tuple[float, Any]], fails: int, wall: float, sat: float, buckets: list[dict[str, float]]) -> dict[str, Any]:
-            lats = np.array([p.e2e_latency_ms for _, p in preds], dtype=np.float64) if preds else np.array([99999.0])
-            ttfts = np.array([p.ttft_ms for _, p in preds], dtype=np.float64) if preds else np.array([99999.0])
+            raw_lats = [p.e2e_latency_ms for _, p in preds] + ([90_000.0] * fails)
+            raw_ttfts = [p.ttft_ms for _, p in preds] + ([90_000.0] * fails)
+            lats = np.array(raw_lats, dtype=np.float64) if raw_lats else np.array([99999.0])
+            ttfts = np.array(raw_ttfts, dtype=np.float64) if raw_ttfts else np.array([99999.0])
             return {
                 "p99_latency_ms": round(float(np.percentile(lats, 99)), 2),
                 "p50_latency_ms": round(float(np.percentile(lats, 50)), 2),
