@@ -21,6 +21,7 @@ from alpha_inference.reporting import (
     MACHINE_TYPE,
     RELOAD_PROXY_FILE,
     CandidateSpec,
+    compose_sitecustomize_source,
     parse_candidate_code,
 )
 
@@ -247,6 +248,7 @@ def build_container_launch_spec(
                 "vllm_args": cand.vllm_args,
                 "env_vars": cand.env_vars,
                 "custom_kernel_code": cand.custom_kernel_code,
+                "moe_tuned_config": {str(k): v for k, v in cand.moe_tuned_config.items()},
                 "startup_timeout_sec": 1500.0,
             }
         )
@@ -273,10 +275,11 @@ def build_container_launch_spec(
     if hf_token:
         env["HF_TOKEN"] = hf_token
 
-    if not cand.custom_kernel_code.strip():
+    site_src = compose_sitecustomize_source(cand.custom_kernel_code, cand.moe_tuned_config)
+    if not site_src:
         return ["vllm", "serve"], list(cand.vllm_args), env, ""
 
-    env["AE_KERNEL_B64"] = base64.b64encode(cand.custom_kernel_code.encode("utf-8")).decode("ascii")
+    env["AE_KERNEL_B64"] = base64.b64encode(site_src.encode("utf-8")).decode("ascii")
     bootstrap = (
         "mkdir -p /tmp/ae_kernel && "
         'python3 -c "import base64, os, pathlib; '

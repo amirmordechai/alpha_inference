@@ -125,6 +125,7 @@ bash results/my_workload/gcloud_rollout.sh
 | `--endpoint` | Attach to existing GPU VM(s) running `python -m alpha_inference.reload_proxy`. |
 | `--trace` | Path to any OpenAI-compatible JSONL request trace (`messages`/`prompt` + `timestamp`). |
 | `--metric` | `p99_latency` *(minimize)*, `latency` *(minimize P50)*, `throughput` *(maximize req/s)*, `ttft` *(minimize P99 Time-To-First-Token)*. |
+| `--continue-from` | Warm-start a new optimization stage from a prior results directory, stitching `results.tsv`, `progress.png`, and cumulative spend while preserving the Ground-Zero `#0` KL baseline. |
 | `--budget-usd` | Hard USD cloud-spend circuit breaker (`BudgetedAlphaEvolveExperiment`). |
 
 ---

@@ -1,0 +1,122 @@
+[
+  {
+    "kernel": "fused_moe_kernel",
+    "total_ms": 98.25,
+    "pct_gpu_time": 54.36,
+    "calls": 960
+  },
+  {
+    "kernel": "_ZN7cutlass13device_kernelI19enable_sm120_familyINS_4gemm6kernel13GemmUniversalIN4cute5tupleIJiiiiEEENS2_10col",
+    "total_ms": 26.937,
+    "pct_gpu_time": 14.9,
+    "calls": 1920
+  },
+  {
+    "kernel": "kernel_unified_attention",
+    "total_ms": 14.982,
+    "pct_gpu_time": 8.29,
+    "calls": 480
+  },
+  {
+    "kernel": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_256x64_32x4_tn_align8>(cutlass_80_tensorop",
+    "total_ms": 9.258,
+    "pct_gpu_time": 5.12,
+    "calls": 9
+  },
+  {
+    "kernel": "void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x1_tn_align8>(cutlass_80_wmma_te",
+    "total_ms": 5.94,
+    "pct_gpu_time": 3.29,
+    "calls": 6
+  },
+  {
+    "kernel": "triton_red_fused__to_copy_abs_add_clamp_cutlass_scaled_mm_div_max_mul_reciprocal_rms_norm_unsqueeze_3",
+    "total_ms": 2.845,
+    "pct_gpu_time": 1.57,
+    "calls": 464
+  },
+  {
+    "kernel": "triton_red_fused__to_copy_abs_add_clamp_cutlass_scaled_mm_div_max_moe_forward_mul_reciprocal_rms_norm_unsqueez",
+    "total_ms": 2.521,
+    "pct_gpu_time": 1.39,
+    "calls": 480
+  },
+  {
+    "kernel": "void vllm::absmax_reduction_flat<c10::BFloat16, c10::Float8_e4m3fn>(float*, c10::BFloat16 const*, long)",
+    "total_ms": 1.533,
+    "pct_gpu_time": 0.85,
+    "calls": 960
+  },
+  {
+    "kernel": "void vllm::moe::moe_align_block_size_kernel<int>(int const*, int*, int*, int*, int*, int, int, int, int, unsig",
+    "total_ms": 1.445,
+    "pct_gpu_time": 0.8,
+    "calls": 480
+  },
+  {
+    "kernel": "void vllm::scaled_fp8_quant_kernel_strided_dynamic<c10::BFloat16, c10::Float8_e4m3fn>(c10::Float8_e4m3fn*, c10",
+    "total_ms": 1.29,
+    "pct_gpu_time": 0.71,
+    "calls": 960
+  },
+  {
+    "kernel": "void cublasLt::splitKreduce_kernel<32, 16, int, float, float, float, float, false, float, float, float, true, ",
+    "total_ms": 1.105,
+    "pct_gpu_time": 0.61,
+    "calls": 480
+  },
+  {
+    "kernel": "triton_red_fused__to_copy_abs_clamp_cutlass_scaled_mm_div_gelu_max_mul_reciprocal_slice_unsqueeze_2",
+    "total_ms": 1.07,
+    "pct_gpu_time": 0.59,
+    "calls": 480
+  },
+  {
+    "kernel": "std::enable_if<!(false), void>::type internal::gemvx::kernel<int, int, __nv_bfloat16, __nv_bfloat16, __nv_bflo",
+    "total_ms": 1.038,
+    "pct_gpu_time": 0.57,
+    "calls": 1
+  },
+  {
+    "kernel": "void vllm::act_and_mul_kernel<c10::BFloat16, __nv_bfloat162, &(c10::BFloat16 vllm::gelu_tanh_kernel<c10::BFloa",
+    "total_ms": 1.031,
+    "pct_gpu_time": 0.57,
+    "calls": 480
+  },
+  {
+    "kernel": "triton_red_fused__to_copy_abs_clamp_cutlass_scaled_mm_div_max_mul_reciprocal_unsqueeze_view_0",
+    "total_ms": 0.959,
+    "pct_gpu_time": 0.53,
+    "calls": 480
+  },
+  {
+    "kernel": "triton_red_fused__to_copy_add_cat_clamp_index_select_mul_reciprocal_rms_norm_split_split_with_sizes_sub_unsque",
+    "total_ms": 0.929,
+    "pct_gpu_time": 0.51,
+    "calls": 400
+  },
+  {
+    "kernel": "void vllm::moe::moe_sum_vec_kernel<c10::BFloat16, int, 8, false>(c10::BFloat16*, c10::BFloat16 const*, long, i",
+    "total_ms": 0.904,
+    "pct_gpu_time": 0.5,
+    "calls": 480
+  },
+  {
+    "kernel": "_gemma4_routing_kernel",
+    "total_ms": 0.903,
+    "pct_gpu_time": 0.5,
+    "calls": 480
+  },
+  {
+    "kernel": "reshape_and_cache_kernel_flash",
+    "total_ms": 0.862,
+    "pct_gpu_time": 0.48,
+    "calls": 480
+  },
+  {
+    "kernel": "triton_red_fused_4",
+    "total_ms": 0.793,
+    "pct_gpu_time": 0.44,
+    "calls": 80
+  }
+]

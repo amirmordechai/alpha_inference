@@ -1,5 +1,5 @@
 {
-  "validated_at_utc": "2026-11-05T13:36:55.538453+00:00",
+  "validated_at_utc": "2026-11-08T15:06:05.556548+00:00",
   "trace_path": "examples/email_triage/tuesday_peak_30m.jsonl.gz",
   "num_requests": 19800,
   "replay_duration_min": 30.01,
@@ -7,581 +7,581 @@
   "metric_label": "P99 Latency",
   "baseline_source": "candidate.py",
   "best_source": "examples/email_triage/results/best_candidate.py",
-  "best_hypothesis": "Reduce max-num-batched-tokens to 2048 to lower chunked prefill chunk size, and set block-size to 32 to improve FlashInfer page table tracking and alignment efficiency.",
+  "best_hypothesis": "Further reduce padding waste in MoE Triton backend by shrinking BLOCK_SIZE_M for larger batch sizes. Increase speculative tokens to 4 to capitalize on the fast accept rate.",
   "baseline": {
-    "p99_latency_ms": 26166.92,
-    "p50_latency_ms": 8732.56,
-    "mean_latency_ms": 9250.98,
-    "ttft_p99_ms": 26166.92,
+    "p99_latency_ms": 24603.03,
+    "p50_latency_ms": 9188.79,
+    "mean_latency_ms": 8802.79,
+    "ttft_p99_ms": 24603.03,
     "trace_rps": 11.0,
-    "throughput_rps": 24.77,
+    "throughput_rps": 25.16,
     "completed_requests": 19800,
     "failed_requests": 0,
-    "wall_sec": 1800.74,
+    "wall_sec": 1800.73,
     "time_buckets": [
       {
         "bucket_idx": 0.0,
         "start_sec": 0.0,
         "requests": 720.0,
         "rps": 12.0,
-        "p50_ms": 9968.46,
-        "p99_ms": 13114.72,
-        "ttft_p99_ms": 13114.72
+        "p50_ms": 10031.63,
+        "p99_ms": 13275.5,
+        "ttft_p99_ms": 13275.5
       },
       {
         "bucket_idx": 1.0,
         "start_sec": 60.0,
         "requests": 779.0,
         "rps": 12.98,
-        "p50_ms": 11172.78,
-        "p99_ms": 16057.45,
-        "ttft_p99_ms": 16057.45
+        "p50_ms": 11113.07,
+        "p99_ms": 16011.25,
+        "ttft_p99_ms": 16011.25
       },
       {
         "bucket_idx": 2.0,
         "start_sec": 120.0,
         "requests": 788.0,
         "rps": 13.13,
-        "p50_ms": 6473.38,
-        "p99_ms": 34454.86,
-        "ttft_p99_ms": 34454.86
+        "p50_ms": 8557.67,
+        "p99_ms": 26757.16,
+        "ttft_p99_ms": 26757.16
       },
       {
         "bucket_idx": 3.0,
         "start_sec": 180.0,
         "requests": 738.0,
         "rps": 12.3,
-        "p50_ms": 9619.96,
-        "p99_ms": 25285.18,
-        "ttft_p99_ms": 25285.18
+        "p50_ms": 10336.24,
+        "p99_ms": 21863.3,
+        "ttft_p99_ms": 21863.3
       },
       {
         "bucket_idx": 4.0,
         "start_sec": 240.0,
         "requests": 810.0,
         "rps": 13.5,
-        "p50_ms": 11342.61,
-        "p99_ms": 22198.96,
-        "ttft_p99_ms": 22198.96
+        "p50_ms": 11543.69,
+        "p99_ms": 17145.53,
+        "ttft_p99_ms": 17145.53
       },
       {
         "bucket_idx": 5.0,
         "start_sec": 300.0,
         "requests": 717.0,
         "rps": 11.95,
-        "p50_ms": 7440.56,
-        "p99_ms": 26948.05,
-        "ttft_p99_ms": 26948.05
+        "p50_ms": 9116.51,
+        "p99_ms": 25110.4,
+        "ttft_p99_ms": 25110.4
       },
       {
         "bucket_idx": 6.0,
         "start_sec": 360.0,
         "requests": 697.0,
         "rps": 11.62,
-        "p50_ms": 8719.62,
-        "p99_ms": 25357.99,
-        "ttft_p99_ms": 25357.99
+        "p50_ms": 9761.37,
+        "p99_ms": 12417.04,
+        "ttft_p99_ms": 12417.04
       },
       {
         "bucket_idx": 7.0,
         "start_sec": 420.0,
         "requests": 744.0,
         "rps": 12.4,
-        "p50_ms": 10074.64,
-        "p99_ms": 23254.81,
-        "ttft_p99_ms": 23254.81
+        "p50_ms": 10332.58,
+        "p99_ms": 14204.82,
+        "ttft_p99_ms": 14204.82
       },
       {
         "bucket_idx": 8.0,
         "start_sec": 480.0,
         "requests": 639.0,
         "rps": 10.65,
-        "p50_ms": 7547.28,
-        "p99_ms": 24676.58,
-        "ttft_p99_ms": 24676.58
+        "p50_ms": 8638.55,
+        "p99_ms": 23389.54,
+        "ttft_p99_ms": 23389.54
       },
       {
         "bucket_idx": 9.0,
         "start_sec": 540.0,
         "requests": 729.0,
         "rps": 12.15,
-        "p50_ms": 8657.67,
-        "p99_ms": 25614.86,
-        "ttft_p99_ms": 25614.86
+        "p50_ms": 10364.77,
+        "p99_ms": 13665.28,
+        "ttft_p99_ms": 13665.28
       },
       {
         "bucket_idx": 10.0,
         "start_sec": 600.0,
         "requests": 720.0,
         "rps": 12.0,
-        "p50_ms": 9887.75,
-        "p99_ms": 22607.63,
-        "ttft_p99_ms": 22607.63
+        "p50_ms": 10106.97,
+        "p99_ms": 13426.21,
+        "ttft_p99_ms": 13426.21
       },
       {
         "bucket_idx": 11.0,
         "start_sec": 660.0,
         "requests": 694.0,
         "rps": 11.57,
-        "p50_ms": 8705.83,
-        "p99_ms": 24672.01,
-        "ttft_p99_ms": 24672.01
+        "p50_ms": 9560.27,
+        "p99_ms": 23416.2,
+        "ttft_p99_ms": 23416.2
       },
       {
         "bucket_idx": 12.0,
         "start_sec": 720.0,
         "requests": 674.0,
         "rps": 11.23,
-        "p50_ms": 9032.43,
-        "p99_ms": 23224.74,
-        "ttft_p99_ms": 23224.74
+        "p50_ms": 9365.8,
+        "p99_ms": 11996.99,
+        "ttft_p99_ms": 11996.99
       },
       {
         "bucket_idx": 13.0,
         "start_sec": 780.0,
         "requests": 719.0,
         "rps": 11.98,
-        "p50_ms": 9706.41,
-        "p99_ms": 23838.07,
-        "ttft_p99_ms": 23838.07
+        "p50_ms": 9990.01,
+        "p99_ms": 13344.62,
+        "ttft_p99_ms": 13344.62
       },
       {
         "bucket_idx": 14.0,
         "start_sec": 840.0,
         "requests": 617.0,
         "rps": 10.28,
-        "p50_ms": 7827.51,
-        "p99_ms": 24705.54,
-        "ttft_p99_ms": 24705.54
+        "p50_ms": 8884.75,
+        "p99_ms": 22043.68,
+        "ttft_p99_ms": 22043.68
       },
       {
         "bucket_idx": 15.0,
         "start_sec": 900.0,
         "requests": 691.0,
         "rps": 11.52,
-        "p50_ms": 9599.19,
-        "p99_ms": 12526.91,
-        "ttft_p99_ms": 12526.91
+        "p50_ms": 9586.0,
+        "p99_ms": 12392.73,
+        "ttft_p99_ms": 12392.73
       },
       {
         "bucket_idx": 16.0,
         "start_sec": 960.0,
         "requests": 672.0,
         "rps": 11.2,
-        "p50_ms": 8643.97,
-        "p99_ms": 24216.22,
-        "ttft_p99_ms": 24216.22
+        "p50_ms": 9319.03,
+        "p99_ms": 11709.83,
+        "ttft_p99_ms": 11709.83
       },
       {
         "bucket_idx": 17.0,
         "start_sec": 1020.0,
         "requests": 617.0,
         "rps": 10.28,
-        "p50_ms": 7521.38,
-        "p99_ms": 23660.52,
-        "ttft_p99_ms": 23660.52
+        "p50_ms": 8347.02,
+        "p99_ms": 10852.4,
+        "ttft_p99_ms": 10852.4
       },
       {
         "bucket_idx": 18.0,
         "start_sec": 1080.0,
         "requests": 626.0,
         "rps": 10.43,
-        "p50_ms": 9079.63,
-        "p99_ms": 11712.86,
-        "ttft_p99_ms": 11712.86
+        "p50_ms": 9174.85,
+        "p99_ms": 11884.83,
+        "ttft_p99_ms": 11884.83
       },
       {
         "bucket_idx": 19.0,
         "start_sec": 1140.0,
         "requests": 601.0,
         "rps": 10.02,
-        "p50_ms": 8442.15,
-        "p99_ms": 11100.19,
-        "ttft_p99_ms": 11100.19
+        "p50_ms": 8393.68,
+        "p99_ms": 11031.31,
+        "ttft_p99_ms": 11031.31
       },
       {
         "bucket_idx": 20.0,
         "start_sec": 1200.0,
         "requests": 636.0,
         "rps": 10.6,
-        "p50_ms": 8671.98,
-        "p99_ms": 23318.4,
-        "ttft_p99_ms": 23318.4
+        "p50_ms": 9010.53,
+        "p99_ms": 11554.01,
+        "ttft_p99_ms": 11554.01
       },
       {
         "bucket_idx": 21.0,
         "start_sec": 1260.0,
         "requests": 547.0,
         "rps": 9.12,
-        "p50_ms": 7403.94,
-        "p99_ms": 9600.91,
-        "ttft_p99_ms": 9600.91
+        "p50_ms": 7379.94,
+        "p99_ms": 9591.7,
+        "ttft_p99_ms": 9591.7
       },
       {
         "bucket_idx": 22.0,
         "start_sec": 1320.0,
         "requests": 593.0,
         "rps": 9.88,
-        "p50_ms": 8013.67,
-        "p99_ms": 10654.28,
-        "ttft_p99_ms": 10654.28
+        "p50_ms": 8032.05,
+        "p99_ms": 10565.14,
+        "ttft_p99_ms": 10565.14
       },
       {
         "bucket_idx": 23.0,
         "start_sec": 1380.0,
         "requests": 641.0,
         "rps": 10.68,
-        "p50_ms": 8970.78,
-        "p99_ms": 23563.06,
-        "ttft_p99_ms": 23563.06
+        "p50_ms": 9411.56,
+        "p99_ms": 11906.05,
+        "ttft_p99_ms": 11906.05
       },
       {
         "bucket_idx": 24.0,
         "start_sec": 1440.0,
         "requests": 596.0,
         "rps": 9.93,
-        "p50_ms": 8858.48,
-        "p99_ms": 12046.7,
-        "ttft_p99_ms": 12046.7
+        "p50_ms": 8913.35,
+        "p99_ms": 11525.45,
+        "ttft_p99_ms": 11525.45
       },
       {
         "bucket_idx": 25.0,
         "start_sec": 1500.0,
         "requests": 605.0,
         "rps": 10.08,
-        "p50_ms": 8139.77,
-        "p99_ms": 23817.55,
-        "ttft_p99_ms": 23817.55
+        "p50_ms": 8869.43,
+        "p99_ms": 11189.11,
+        "ttft_p99_ms": 11189.11
       },
       {
         "bucket_idx": 26.0,
         "start_sec": 1560.0,
         "requests": 500.0,
         "rps": 8.33,
-        "p50_ms": 6826.93,
-        "p99_ms": 8902.25,
-        "ttft_p99_ms": 8902.25
+        "p50_ms": 6805.32,
+        "p99_ms": 8903.4,
+        "ttft_p99_ms": 8903.4
       },
       {
         "bucket_idx": 27.0,
         "start_sec": 1620.0,
         "requests": 576.0,
         "rps": 9.6,
-        "p50_ms": 8252.45,
-        "p99_ms": 10619.5,
-        "ttft_p99_ms": 10619.5
+        "p50_ms": 8214.22,
+        "p99_ms": 10544.02,
+        "ttft_p99_ms": 10544.02
       },
       {
         "bucket_idx": 28.0,
         "start_sec": 1680.0,
         "requests": 612.0,
         "rps": 10.2,
-        "p50_ms": 8980.36,
-        "p99_ms": 11885.69,
-        "ttft_p99_ms": 11885.69
+        "p50_ms": 8907.26,
+        "p99_ms": 11828.48,
+        "ttft_p99_ms": 11828.48
       },
       {
         "bucket_idx": 29.0,
         "start_sec": 1740.0,
         "requests": 502.0,
         "rps": 8.44,
-        "p50_ms": 7439.95,
-        "p99_ms": 9762.9,
-        "ttft_p99_ms": 9762.9
+        "p50_ms": 7434.65,
+        "p99_ms": 9700.63,
+        "ttft_p99_ms": 9700.63
       }
     ]
   },
   "best_evolved": {
-    "p99_latency_ms": 25739.52,
-    "p50_latency_ms": 7756.49,
-    "mean_latency_ms": 8655.02,
-    "ttft_p99_ms": 25739.52,
+    "p99_latency_ms": 22595.4,
+    "p50_latency_ms": 3524.22,
+    "mean_latency_ms": 3926.3,
+    "ttft_p99_ms": 22595.4,
     "trace_rps": 11.0,
-    "throughput_rps": 24.7,
+    "throughput_rps": 39.55,
     "completed_requests": 19800,
     "failed_requests": 0,
-    "wall_sec": 1800.77,
+    "wall_sec": 1800.6,
     "time_buckets": [
       {
         "bucket_idx": 0.0,
         "start_sec": 0.0,
         "requests": 720.0,
         "rps": 12.0,
-        "p50_ms": 9309.96,
-        "p99_ms": 12681.49,
-        "ttft_p99_ms": 12681.49
+        "p50_ms": 4599.54,
+        "p99_ms": 6299.3,
+        "ttft_p99_ms": 6299.3
       },
       {
         "bucket_idx": 1.0,
         "start_sec": 60.0,
         "requests": 779.0,
         "rps": 12.98,
-        "p50_ms": 10608.19,
-        "p99_ms": 14795.3,
-        "ttft_p99_ms": 14795.3
+        "p50_ms": 5211.05,
+        "p99_ms": 7563.15,
+        "ttft_p99_ms": 7563.15
       },
       {
         "bucket_idx": 2.0,
         "start_sec": 120.0,
         "requests": 788.0,
         "rps": 13.13,
-        "p50_ms": 6331.32,
-        "p99_ms": 34530.38,
-        "ttft_p99_ms": 34530.38
+        "p50_ms": 2602.6,
+        "p99_ms": 25097.68,
+        "ttft_p99_ms": 25097.68
       },
       {
         "bucket_idx": 3.0,
         "start_sec": 180.0,
         "requests": 738.0,
         "rps": 12.3,
-        "p50_ms": 8208.27,
-        "p99_ms": 24558.56,
-        "ttft_p99_ms": 24558.56
+        "p50_ms": 4279.5,
+        "p99_ms": 21884.21,
+        "ttft_p99_ms": 21884.21
       },
       {
         "bucket_idx": 4.0,
         "start_sec": 240.0,
         "requests": 810.0,
         "rps": 13.5,
-        "p50_ms": 11537.3,
-        "p99_ms": 22927.99,
-        "ttft_p99_ms": 22927.99
+        "p50_ms": 4999.24,
+        "p99_ms": 21410.82,
+        "ttft_p99_ms": 21410.82
       },
       {
         "bucket_idx": 5.0,
         "start_sec": 300.0,
         "requests": 717.0,
         "rps": 11.95,
-        "p50_ms": 7030.32,
-        "p99_ms": 26724.92,
-        "ttft_p99_ms": 26724.92
+        "p50_ms": 3071.34,
+        "p99_ms": 22751.24,
+        "ttft_p99_ms": 22751.24
       },
       {
         "bucket_idx": 6.0,
         "start_sec": 360.0,
         "requests": 697.0,
         "rps": 11.62,
-        "p50_ms": 7695.21,
-        "p99_ms": 24261.62,
-        "ttft_p99_ms": 24261.62
+        "p50_ms": 4059.71,
+        "p99_ms": 5631.47,
+        "ttft_p99_ms": 5631.47
       },
       {
         "bucket_idx": 7.0,
         "start_sec": 420.0,
         "requests": 744.0,
         "rps": 12.4,
-        "p50_ms": 9521.78,
-        "p99_ms": 22427.1,
-        "ttft_p99_ms": 22427.1
+        "p50_ms": 4514.08,
+        "p99_ms": 6610.59,
+        "ttft_p99_ms": 6610.59
       },
       {
         "bucket_idx": 8.0,
         "start_sec": 480.0,
         "requests": 639.0,
         "rps": 10.65,
-        "p50_ms": 7132.54,
-        "p99_ms": 24344.87,
-        "ttft_p99_ms": 24344.87
+        "p50_ms": 3159.76,
+        "p99_ms": 21490.1,
+        "ttft_p99_ms": 21490.1
       },
       {
         "bucket_idx": 9.0,
         "start_sec": 540.0,
         "requests": 729.0,
         "rps": 12.15,
-        "p50_ms": 7842.69,
-        "p99_ms": 24979.03,
-        "ttft_p99_ms": 24979.03
+        "p50_ms": 4416.73,
+        "p99_ms": 5990.68,
+        "ttft_p99_ms": 5990.68
       },
       {
         "bucket_idx": 10.0,
         "start_sec": 600.0,
         "requests": 720.0,
         "rps": 12.0,
-        "p50_ms": 9368.8,
-        "p99_ms": 12984.53,
-        "ttft_p99_ms": 12984.53
+        "p50_ms": 4362.05,
+        "p99_ms": 5861.52,
+        "ttft_p99_ms": 5861.52
       },
       {
         "bucket_idx": 11.0,
         "start_sec": 660.0,
         "requests": 694.0,
         "rps": 11.57,
-        "p50_ms": 7786.29,
-        "p99_ms": 23910.56,
-        "ttft_p99_ms": 23910.56
+        "p50_ms": 3492.79,
+        "p99_ms": 21984.29,
+        "ttft_p99_ms": 21984.29
       },
       {
         "bucket_idx": 12.0,
         "start_sec": 720.0,
         "requests": 674.0,
         "rps": 11.23,
-        "p50_ms": 7976.88,
-        "p99_ms": 22598.82,
-        "ttft_p99_ms": 22598.82
+        "p50_ms": 3704.96,
+        "p99_ms": 5583.74,
+        "ttft_p99_ms": 5583.74
       },
       {
         "bucket_idx": 13.0,
         "start_sec": 780.0,
         "requests": 719.0,
         "rps": 11.98,
-        "p50_ms": 8975.73,
-        "p99_ms": 22990.85,
-        "ttft_p99_ms": 22990.85
+        "p50_ms": 4294.04,
+        "p99_ms": 5938.36,
+        "ttft_p99_ms": 5938.36
       },
       {
         "bucket_idx": 14.0,
         "start_sec": 840.0,
         "requests": 617.0,
         "rps": 10.28,
-        "p50_ms": 7497.28,
-        "p99_ms": 23885.66,
-        "ttft_p99_ms": 23885.66
+        "p50_ms": 3395.83,
+        "p99_ms": 21330.05,
+        "ttft_p99_ms": 21330.05
       },
       {
         "bucket_idx": 15.0,
         "start_sec": 900.0,
         "requests": 691.0,
         "rps": 11.52,
-        "p50_ms": 8650.39,
-        "p99_ms": 12073.87,
-        "ttft_p99_ms": 12073.87
+        "p50_ms": 3589.79,
+        "p99_ms": 21718.68,
+        "ttft_p99_ms": 21718.68
       },
       {
         "bucket_idx": 16.0,
         "start_sec": 960.0,
         "requests": 672.0,
         "rps": 11.2,
-        "p50_ms": 7988.32,
-        "p99_ms": 23728.31,
-        "ttft_p99_ms": 23728.31
+        "p50_ms": 3764.43,
+        "p99_ms": 5506.61,
+        "ttft_p99_ms": 5506.61
       },
       {
         "bucket_idx": 17.0,
         "start_sec": 1020.0,
         "requests": 617.0,
         "rps": 10.28,
-        "p50_ms": 7035.16,
-        "p99_ms": 23778.97,
-        "ttft_p99_ms": 23778.97
+        "p50_ms": 3119.05,
+        "p99_ms": 4709.22,
+        "ttft_p99_ms": 4709.22
       },
       {
         "bucket_idx": 18.0,
         "start_sec": 1080.0,
         "requests": 626.0,
         "rps": 10.43,
-        "p50_ms": 8025.71,
-        "p99_ms": 11610.67,
-        "ttft_p99_ms": 11610.67
+        "p50_ms": 3410.76,
+        "p99_ms": 5111.67,
+        "ttft_p99_ms": 5111.67
       },
       {
         "bucket_idx": 19.0,
         "start_sec": 1140.0,
         "requests": 601.0,
         "rps": 10.02,
-        "p50_ms": 7561.61,
-        "p99_ms": 10705.15,
-        "ttft_p99_ms": 10705.15
+        "p50_ms": 3392.83,
+        "p99_ms": 5100.26,
+        "ttft_p99_ms": 5100.26
       },
       {
         "bucket_idx": 20.0,
         "start_sec": 1200.0,
         "requests": 636.0,
         "rps": 10.6,
-        "p50_ms": 7713.59,
-        "p99_ms": 22362.5,
-        "ttft_p99_ms": 22362.5
+        "p50_ms": 3308.7,
+        "p99_ms": 5031.75,
+        "ttft_p99_ms": 5031.75
       },
       {
         "bucket_idx": 21.0,
         "start_sec": 1260.0,
         "requests": 547.0,
         "rps": 9.12,
-        "p50_ms": 7051.98,
-        "p99_ms": 9002.53,
-        "ttft_p99_ms": 9002.53
+        "p50_ms": 2890.58,
+        "p99_ms": 4012.45,
+        "ttft_p99_ms": 4012.45
       },
       {
         "bucket_idx": 22.0,
         "start_sec": 1320.0,
         "requests": 593.0,
         "rps": 9.88,
-        "p50_ms": 7295.72,
-        "p99_ms": 9855.64,
-        "ttft_p99_ms": 9855.64
+        "p50_ms": 3176.38,
+        "p99_ms": 4601.14,
+        "ttft_p99_ms": 4601.14
       },
       {
         "bucket_idx": 23.0,
         "start_sec": 1380.0,
         "requests": 641.0,
         "rps": 10.68,
-        "p50_ms": 7824.23,
-        "p99_ms": 22844.35,
-        "ttft_p99_ms": 22844.35
+        "p50_ms": 3817.19,
+        "p99_ms": 5383.67,
+        "ttft_p99_ms": 5383.67
       },
       {
         "bucket_idx": 24.0,
         "start_sec": 1440.0,
         "requests": 596.0,
         "rps": 9.93,
-        "p50_ms": 8064.22,
-        "p99_ms": 11253.12,
-        "ttft_p99_ms": 11253.12
+        "p50_ms": 3518.38,
+        "p99_ms": 5240.53,
+        "ttft_p99_ms": 5240.53
       },
       {
         "bucket_idx": 25.0,
         "start_sec": 1500.0,
         "requests": 605.0,
         "rps": 10.08,
-        "p50_ms": 7556.98,
-        "p99_ms": 23353.9,
-        "ttft_p99_ms": 23353.9
+        "p50_ms": 3404.54,
+        "p99_ms": 4980.55,
+        "ttft_p99_ms": 4980.55
       },
       {
         "bucket_idx": 26.0,
         "start_sec": 1560.0,
         "requests": 500.0,
         "rps": 8.33,
-        "p50_ms": 6523.29,
-        "p99_ms": 8610.83,
-        "ttft_p99_ms": 8610.83
+        "p50_ms": 2682.28,
+        "p99_ms": 3852.79,
+        "ttft_p99_ms": 3852.79
       },
       {
         "bucket_idx": 27.0,
         "start_sec": 1620.0,
         "requests": 576.0,
         "rps": 9.6,
-        "p50_ms": 7247.49,
-        "p99_ms": 10309.85,
-        "ttft_p99_ms": 10309.85
+        "p50_ms": 3163.35,
+        "p99_ms": 4589.89,
+        "ttft_p99_ms": 4589.89
       },
       {
         "bucket_idx": 28.0,
         "start_sec": 1680.0,
         "requests": 612.0,
         "rps": 10.2,
-        "p50_ms": 7963.59,
-        "p99_ms": 11166.94,
-        "ttft_p99_ms": 11166.94
+        "p50_ms": 3490.97,
+        "p99_ms": 5153.52,
+        "ttft_p99_ms": 5153.52
       },
       {
         "bucket_idx": 29.0,
         "start_sec": 1740.0,
         "requests": 502.0,
         "rps": 8.44,
-        "p50_ms": 7128.35,
-        "p99_ms": 9123.81,
-        "ttft_p99_ms": 9123.81
+        "p50_ms": 2844.1,
+        "p99_ms": 4247.02,
+        "ttft_p99_ms": 4247.02
       }
     ]
   },
-  "p99_reduction_pct": -1.63,
-  "throughput_gain_pct": -0.28,
+  "p99_reduction_pct": -8.16,
+  "throughput_gain_pct": 57.19,
   "unseen_equivalence": {
     "passed": true,
     "num_checked": 100,
-    "mean_kl_divergence": 0.00025,
-    "exact_slot_match_pct": 99.91,
-    "confident_slot_match_pct": 100.0,
+    "mean_kl_divergence": 0.00415,
+    "exact_slot_match_pct": 99.5,
+    "confident_slot_match_pct": 99.6,
     "reason": "ok"
   }
 }

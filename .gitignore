@@ -9,3 +9,4 @@ build/
 runs/
 examples/*/results/baseline_responses*
 examples/*/results/search_endpoints.json
+examples/*/results/*_snapshot/

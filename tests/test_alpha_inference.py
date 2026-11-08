@@ -29,7 +29,10 @@ from alpha_inference.evaluator import (
 from alpha_inference.reporting import (
     REPO_ROOT,
     build_seed_program_source,
+    compose_sitecustomize_source,
     parse_candidate_code,
+    summarize_engine_metrics_delta,
+    upgrade_candidate_source_for_evolution,
     validate_candidate_spec,
 )
 from alpha_inference.vertex import build_gcloud_rollout_command, teardown_endpoint
@@ -53,17 +56,110 @@ def test_candidate_validation_rejects_cheating_and_unsafe_kernels() -> None:
     ok, reason = validate_candidate_spec(swapped, base)
     assert not ok and "Model checkpoint" in reason
 
-    # 2. Reject lossy FP8 KV cache flag
-    bad_kv = parse_candidate_code((REPO_ROOT / "candidate.py").read_text(encoding="utf-8"), name="fp8")
-    bad_kv.vllm_args.append("--kv-cache-dtype=fp8")
-    ok, reason = validate_candidate_spec(bad_kv, base)
+    # 2. Reject dummy weights & non-FP8 lossy quantizations
+    bad_dummy = parse_candidate_code((REPO_ROOT / "candidate.py").read_text(encoding="utf-8"), name="dummy")
+    bad_dummy.vllm_args.append("--load-format=dummy")
+    ok, reason = validate_candidate_spec(bad_dummy, base)
     assert not ok and "Forbidden" in reason
 
-    # 3. Reject network imports inside custom Triton kernel code
+    bad_quant = parse_candidate_code((REPO_ROOT / "candidate.py").read_text(encoding="utf-8"), name="bnb")
+    bad_quant.vllm_args.append("--quantization=bitsandbytes")
+    ok, reason = validate_candidate_spec(bad_quant, base)
+    assert not ok and "--quantization" in reason
+
+    # 3. Reject external draft model checkpoints in --speculative-config
+    bad_spec = parse_candidate_code((REPO_ROOT / "candidate.py").read_text(encoding="utf-8"), name="bad_spec")
+    bad_spec.vllm_args.append('--speculative-config={"method":"eagle","model":"other/draft-1b","num_speculative_tokens":3}')
+    ok, reason = validate_candidate_spec(bad_spec, base)
+    assert not ok and "speculative" in reason.lower()
+
+    # 4. Allow KL-gated hardware FP8, self-contained GPU n-gram speculation, kernel-config, and MoE Triton tile schedules
+    good_hw = parse_candidate_code((REPO_ROOT / "candidate.py").read_text(encoding="utf-8"), name="good_hw")
+    good_hw.vllm_args.extend(
+        [
+            "--quantization=fp8",
+            "--kv-cache-dtype=fp8",
+            '--speculative-config={"method":"ngram_gpu","num_speculative_tokens":3,"prompt_lookup_max":5,"prompt_lookup_min":2}',
+            '--kernel-config={"enable_flashinfer_autotune":true}',
+            '--compilation-config={"cudagraph_capture_sizes":[1,2,4,8,16,32,64]}',
+        ]
+    )
+    good_hw.moe_tuned_config = {
+        16: {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 1, "num_warps": 4, "num_stages": 4}
+    }
+    ok, reason = validate_candidate_spec(good_hw, base)
+    assert ok, reason
+
+    # 5. Reject network imports inside custom Triton kernel code
     bad_kern = parse_candidate_code((REPO_ROOT / "candidate.py").read_text(encoding="utf-8"), name="net")
     bad_kern.custom_kernel_code = "import socket\nx = 1\n"
     ok, reason = validate_candidate_spec(bad_kern, base)
     assert not ok and "socket" in reason
+
+
+def test_sitecustomize_hooks_and_warm_start_continue_from() -> None:
+    site_src = compose_sitecustomize_source(
+        custom_kernel_code="register_vllm_patch('math', lambda m: setattr(m, '_ae_patched', 42))",
+        moe_tuned_config={8: {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 128}},
+    )
+    assert "_AE_MOE_TUNED_CONFIG" in site_src
+    assert "register_vllm_patch" in site_src
+
+    # Verify reload_proxy.py runs cleanly in an isolated container-like env with alpha_inference blocked
+    iso_proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import runpy, sys; sys.modules['alpha_inference'] = None; "
+            f"ns = runpy.run_path({str(REPO_ROOT / 'alpha_inference' / 'reload_proxy.py')!r}); "
+            "sc = ns['_compose_sitecustomize']('x = 1', {16: {'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 128}}); "
+            "compile(sc, 'sitecustomize.py', 'exec')",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert iso_proc.returncode == 0
+
+    # Verify post-import hook executes cleanly in an isolated subprocess
+    hook_proc = subprocess.run(
+        [sys.executable, "-c", site_src + "\nimport importlib, sys; sys.modules.pop('decimal', None)\nregister_vllm_patch('decimal', lambda m: setattr(m, '_ae_tag', 'ok'))\nimport decimal\nassert decimal._ae_tag == 'ok'\n"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert hook_proc.returncode == 0
+
+    delta = summarize_engine_metrics_delta(
+        {"itl_sum": 1.0, "itl_count": 100.0, "ttft_sum": 2.0, "ttft_count": 10.0, "spec_draft_tokens": 0.0, "spec_accepted_tokens": 0.0},
+        {"itl_sum": 2.2, "itl_count": 300.0, "ttft_sum": 5.0, "ttft_count": 30.0, "spec_draft_tokens": 100.0, "spec_accepted_tokens": 55.0},
+    )
+    assert delta["mean_itl_ms"] == 6.0
+    assert delta["mean_ttft_ms"] == 150.0
+    assert delta["spec_accept_pct"] == 55.0
+
+    stage1_dir = REPO_ROOT / "examples" / "email_triage" / "results"
+    if (stage1_dir / "best_candidate.py").exists() and (stage1_dir / "optimization_summary.json").exists():
+        upgraded = upgrade_candidate_source_for_evolution((stage1_dir / "best_candidate.py").read_text(encoding="utf-8"))
+        assert '"moe_tuned_config"' in upgraded
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "optimize.py",
+                "--continue-from",
+                str(stage1_dir),
+                "--trace",
+                "examples/email_triage/monday_peak_3m.jsonl",
+                "--dry-run",
+            ],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        payload = json.loads(proc.stdout)
+        assert payload["prior_programs_evaluated"] >= 300
+        assert payload["seed_candidate"]["plain_title"]
 
 
 def test_metrics_and_32bit_alpha_evolve_scores() -> None:

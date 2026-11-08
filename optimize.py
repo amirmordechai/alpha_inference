@@ -28,9 +28,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import csv
 import json
 import logging
 import os
+import shutil
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -66,9 +68,13 @@ from alpha_inference.reporting import (
     capture_gpu_profile,
     deploy_search_vertex_endpoint,
     extract_flag_value,
+    introspect_endpoint_model,
     parse_candidate_code,
     plot_progress_chart,
     reload_endpoint,
+    scrape_engine_metrics,
+    summarize_engine_metrics_delta,
+    upgrade_candidate_source_for_evolution,
     validate_candidate_spec,
     write_articulated_summary,
 )
@@ -168,9 +174,46 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--model-2-weight", type=float, default=float(os.getenv("AE_MODEL_2_WEIGHT", "0.45")))
 
     p.add_argument("--out-dir", default="examples/email_triage/results", help="Output directory for articulated results")
+    p.add_argument(
+        "--continue-from",
+        default="",
+        help="Warm-start & stitch on top of an existing results directory (starts from its best_candidate.py and appends to results.tsv)",
+    )
     p.add_argument("--diff", action="store_true", help="Print unified diff between candidate.py and <out-dir>/best_candidate.py")
     p.add_argument("--dry-run", action="store_true", help="Validate trace, seed candidate, and budget with $0 spend")
     return p
+
+
+def _reconstruct_eval_from_tsv_row(row: dict[str, str], num_requests: int) -> TraceEvalResult:
+    eq = EquivalenceReport(
+        passed=True,
+        num_checked=80,
+        num_failed_http=0,
+        exact_slot_matches=80,
+        total_slots=80,
+        exact_slot_match_pct=float(row.get("exact_match_pct") or 100.0),
+        max_prob_abs_diff=0.0,
+        reason="ok",
+        mean_kl_divergence=float(row.get("mean_kl") or 0.0),
+    )
+    p99 = float(row.get("p99_latency_ms") or 0.0)
+    p50 = float(row.get("p50_latency_ms") or 0.0)
+    tput = float(row.get("throughput_rps") or 0.0)
+    wall = float(row.get("eval_wall_sec") or 180.0)
+    return TraceEvalResult(
+        candidate_name=f"cand_{int(row.get('iteration', 0)):03d}",
+        equivalence=eq,
+        p99_latency_ms=p99,
+        p50_latency_ms=p50,
+        mean_latency_ms=round(0.5 * (p50 + p99), 2),
+        ttft_p50_ms=0.0,
+        ttft_p99_ms=float(row.get("ttft_p99_ms") or 0.0),
+        trace_rps=tput,
+        throughput_rps=tput,
+        num_requests=num_requests,
+        num_failures=0,
+        eval_wall_sec=wall,
+    )
 
 
 async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
@@ -194,8 +237,35 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
     max_programs = max(2, int(args.max_programs))
     num_workers = max(1, int(args.workers))
 
+    cont_dir = Path(args.continue_from) if args.continue_from.strip() else None
+    prior_summary: dict[str, Any] = {}
+    prior_rows: list[dict[str, str]] = []
+    prior_eval_offset = 0
+    prior_spend_usd = 0.0
+    warm_seed_source = seed_source
+    warm_seed_cand = baseline_cand
+
+    if cont_dir is not None:
+        for req_f in ("best_candidate.py", "results.tsv", "optimization_summary.json", "baseline_responses.jsonl"):
+            if not (cont_dir / req_f).exists():
+                raise FileNotFoundError(f"--continue-from directory {cont_dir} is missing required file {req_f!r}")
+        prior_summary = json.loads((cont_dir / "optimization_summary.json").read_text(encoding="utf-8"))
+        with (cont_dir / "results.tsv").open("r", encoding="utf-8") as fh:
+            prior_rows = list(csv.DictReader(fh, delimiter="\t"))
+        if not prior_rows:
+            raise RuntimeError(f"Prior results.tsv in {cont_dir} is empty")
+        prior_eval_offset = max(int(r["iteration"]) for r in prior_rows)
+        prior_spend_usd = float(prior_summary.get("total_spend_usd", 0.0))
+        warm_seed_source = upgrade_candidate_source_for_evolution(
+            (cont_dir / "best_candidate.py").read_text(encoding="utf-8")
+        )
+        warm_seed_cand = parse_candidate_code(warm_seed_source, name=f"cand_{prior_eval_offset:03d}_warm_seed")
+        ok_ws, ws_msg = validate_candidate_spec(warm_seed_cand, baseline_cand)
+        if not ok_ws:
+            raise RuntimeError(f"Prior best_candidate.py failed validation: {ws_msg}")
+
     if args.dry_run:
-        return {
+        dry_out: dict[str, Any] = {
             "dry_run": True,
             "official_alpha_evolve_sdk": True,
             "metric": canon_metric,
@@ -210,22 +280,43 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
             "max_programs": max_programs,
             "budget_usd": args.budget_usd,
             "out_dir": args.out_dir,
-            "seed_candidate": {k: v for k, v in asdict(baseline_cand).items() if k != "raw_source"},
+            "seed_candidate": {k: v for k, v in asdict(warm_seed_cand).items() if k != "raw_source"},
         }
+        if cont_dir is not None:
+            dry_out["continued_from"] = str(cont_dir)
+            dry_out["prior_programs_evaluated"] = prior_eval_offset
+            dry_out["prior_spend_usd"] = round(prior_spend_usd, 4)
+        return dry_out
 
     if not args.project_id or not args.ge_app_id:
         raise RuntimeError("Set GCP_PROJECT_ID and GE_APP_ID in .env (or pass --project-id and --ge-app-id).")
 
     out_dir = Path(args.out_dir)
     (out_dir / "candidates").mkdir(parents=True, exist_ok=True)
-    (out_dir / "candidates" / "cand_000_baseline.py").write_text(seed_source, encoding="utf-8")
+    if cont_dir is not None:
+        if cont_dir.resolve() == out_dir.resolve():
+            snap_dir = out_dir / "stage1_snapshot"
+            if not snap_dir.exists():
+                snap_dir.mkdir(parents=True, exist_ok=True)
+                for fn in ("results.tsv", "optimization_summary.json", "summary.md", "best_candidate.py", "progress.png", "unseen_validation.json", "baseline_responses.jsonl"):
+                    if (out_dir / fn).exists():
+                        shutil.copy2(out_dir / fn, snap_dir / fn)
+        else:
+            for fn in ("results.tsv", "baseline_responses.jsonl", "best_candidate.py"):
+                shutil.copy2(cont_dir / fn, out_dir / fn)
+            if (cont_dir / "candidates").exists():
+                for cf in (cont_dir / "candidates").glob("*.py"):
+                    if not (out_dir / "candidates" / cf.name).exists():
+                        shutil.copy2(cf, out_dir / "candidates" / cf.name)
+    else:
+        (out_dir / "candidates" / "cand_000_baseline.py").write_text(seed_source, encoding="utf-8")
 
     t_start = time.perf_counter()
     provisioned_endpoint_ids: list[str] = []
     worker_pool: list[tuple[int, str, str]] = []
     ae_api_spend_est = 0.0
 
-    def current_spend_usd() -> float:
+    def stage_spend_usd() -> float:
         tracks_vertex_gpus = args.deploy_vertex or any(
             (":rawPredict" in u or "vertexai" in u) for _, u, _ in worker_pool
         )
@@ -234,6 +325,9 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
         hrs = (time.perf_counter() - t_start) / 3600.0
         n_gpus = max(1, len(worker_pool) if worker_pool else num_workers)
         return round(hrs * args.hourly_gpu_usd * n_gpus + ae_api_spend_est, 4)
+
+    def cumulative_spend_usd() -> float:
+        return round(prior_spend_usd + stage_spend_usd(), 4)
 
     try:
         # Optional: inspect live --vertex-endpoint-id(s) created via standard `gcloud ai` or Model Garden
@@ -260,6 +354,7 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
         should_provision_workers = args.deploy_vertex or clone_standard_endpoint
         auto_teardown_workers = args.auto_teardown or clone_standard_endpoint
 
+        initial_worker_cand = warm_seed_cand if cont_dir is not None else baseline_cand
         # 1. Provision or attach GPU worker pool
         if should_provision_workers:
             logger.info(
@@ -279,7 +374,7 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
                         args.project_id,
                         args.region,
                         args.ar_repo,
-                        baseline_cand,
+                        initial_worker_cand,
                         f"ae-inf-w{idx}",
                         True,
                         upstream_image=eff_image,
@@ -326,12 +421,12 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
             args.deploy_vertex or "prediction.vertexai" in worker_pool[0][1] or ":rawPredict" in worker_pool[0][1]
         )
 
-        # 2. Evaluate Ground-Zero Baseline (#0) & capture live GPU CUDA kernel profile
+        # 2. Evaluate Ground-Zero Baseline (#0) or Warm-Start Seed, capture GPU profile & introspect model layers
         _, primary_url, primary_tok = worker_pool[0]
         if not should_provision_workers and primary_tok:
             init_targets = worker_pool[:2] if len(worker_pool) > 1 else worker_pool[:1]
             init_rels = await asyncio.gather(
-                *(reload_endpoint(u, t, baseline_cand, use_gcp_auth=use_gcp_auth) for _, u, t in init_targets)
+                *(reload_endpoint(u, t, initial_worker_cand, use_gcp_auth=use_gcp_auth) for _, u, t in init_targets)
             )
             for (_, u, _), rel_item in zip(init_targets, init_rels):
                 if not rel_item.get("ok"):
@@ -341,46 +436,112 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
         baseline_resp_path = out_dir / "baseline_responses.jsonl"
         tsv_path = out_dir / "results.tsv"
         png_path = out_dir / "progress.png"
-        if tsv_path.exists():
-            tsv_path.unlink()
-
-        logger.info("[Eval #0] Measuring Ground-Zero Baseline on %s...", trace_path)
-        base_res = await evaluate_candidate_on_endpoint(
-            candidate_name=baseline_cand.name,
-            endpoint_url=primary_url,
-            trace_path=trace_path,
-            equiv_path=equiv_path,
-            baseline_responses_path=baseline_resp_path,
-            record_baseline=True,
-            secondary_baseline_url=secondary_url,
-            use_gcp_auth=use_gcp_auth,
-            task_mode=resolved_mode,
-            model_name=served_model,
-            metric=canon_metric,
-        )
-        if not base_res.equivalence.passed:
-            raise RuntimeError(f"Ground-Zero baseline failed equivalence recording: {base_res.equivalence.reason}")
-
         sample_req = load_jsonl_requests(equiv_path)[0]
-        gpu_profile = await capture_gpu_profile(
-            primary_url,
-            primary_tok,
-            sample_req,
-            task_mode=resolved_mode,
-            served_model_name=served_model,
-            use_gcp_auth=use_gcp_auth,
+        stage_boundaries: list[dict[str, Any]] = list(prior_summary.get("stage_boundaries") or [])
+        seed_engine_internals: dict[str, float] = {}
+
+        if cont_dir is not None:
+            stage_num = len(stage_boundaries) + 2
+            stage_boundaries.append(
+                {
+                    "stage": stage_num,
+                    "start_iteration": prior_eval_offset + 1,
+                    "label": f"Stage {stage_num}: FP8 + Speculative + Triton/MoE",
+                }
+            )
+            base_row = next((r for r in prior_rows if int(r["iteration"]) == 0), prior_rows[0])
+            base_res = _reconstruct_eval_from_tsv_row(base_row, len(trace_rows))
+            best_keep_rows = [r for r in prior_rows if r["status"] in ("baseline", "keep")]
+            best_prior_row = best_keep_rows[-1] if best_keep_rows else base_row
+            best_res = _reconstruct_eval_from_tsv_row(best_prior_row, len(trace_rows))
+            best_cand = warm_seed_cand
+            best_val = float(prior_summary.get("best_value", best_res.metric_value(canon_metric)))
+            kept_history = list(prior_summary.get("kept_breakthroughs") or [])
+
+            logger.info(
+                "[Warm-Start #%d] Verifying warm seed (%s) & capturing live kernel/engine telemetry...",
+                prior_eval_offset,
+                warm_seed_cand.plain_title,
+            )
+            m_ws_before = await scrape_engine_metrics(primary_url, primary_tok, use_gcp_auth=use_gcp_auth)
+            ws_check = await evaluate_candidate_on_endpoint(
+                candidate_name=warm_seed_cand.name,
+                endpoint_url=primary_url,
+                trace_path=trace_path,
+                equiv_path=equiv_path,
+                baseline_responses_path=baseline_resp_path,
+                record_baseline=False,
+                use_gcp_auth=use_gcp_auth,
+                task_mode=resolved_mode,
+                model_name=served_model,
+                metric=canon_metric,
+            )
+            m_ws_after = await scrape_engine_metrics(primary_url, primary_tok, use_gcp_auth=use_gcp_auth)
+            seed_engine_internals = summarize_engine_metrics_delta(m_ws_before, m_ws_after)
+            if not ws_check.equivalence.passed:
+                raise RuntimeError(f"Warm-start seed failed KL equivalence against Ground-Zero baseline: {ws_check.equivalence.reason}")
+            logger.info(
+                "[Warm-Start #%d] Verified live P99=%.2fms (prior record=%.2fms) | KL=%.5f | Internals=%s",
+                prior_eval_offset,
+                ws_check.p99_latency_ms,
+                best_val,
+                ws_check.equivalence.mean_kl_divergence,
+                seed_engine_internals,
+            )
+        else:
+            if tsv_path.exists():
+                tsv_path.unlink()
+            logger.info("[Eval #0] Measuring Ground-Zero Baseline on %s...", trace_path)
+            m_b0 = await scrape_engine_metrics(primary_url, primary_tok, use_gcp_auth=use_gcp_auth)
+            base_res = await evaluate_candidate_on_endpoint(
+                candidate_name=baseline_cand.name,
+                endpoint_url=primary_url,
+                trace_path=trace_path,
+                equiv_path=equiv_path,
+                baseline_responses_path=baseline_resp_path,
+                record_baseline=True,
+                secondary_baseline_url=secondary_url,
+                use_gcp_auth=use_gcp_auth,
+                task_mode=resolved_mode,
+                model_name=served_model,
+                metric=canon_metric,
+            )
+            m_b1 = await scrape_engine_metrics(primary_url, primary_tok, use_gcp_auth=use_gcp_auth)
+            seed_engine_internals = summarize_engine_metrics_delta(m_b0, m_b1)
+            if not base_res.equivalence.passed:
+                raise RuntimeError(f"Ground-Zero baseline failed equivalence recording: {base_res.equivalence.reason}")
+            best_cand = baseline_cand
+            best_res = base_res
+            best_val = base_res.metric_value(canon_metric)
+            (out_dir / "best_candidate.py").write_text(seed_source, encoding="utf-8")
+            append_results_tsv(tsv_path, 0, "seed_000", "baseline", baseline_cand, base_res)
+            kept_history = []
+            logger.info(
+                "[Eval #0] Baseline %s = %s | P99=%.2fms | P50=%.2fms | Throughput=%.2f req/s",
+                canon_metric,
+                format_metric(best_val, canon_metric),
+                base_res.p99_latency_ms,
+                base_res.p50_latency_ms,
+                base_res.throughput_rps,
+            )
+
+        gpu_profile, model_introspect = await asyncio.gather(
+            capture_gpu_profile(
+                primary_url,
+                primary_tok,
+                sample_req,
+                task_mode=resolved_mode,
+                served_model_name=served_model,
+                use_gcp_auth=use_gcp_auth,
+            ),
+            introspect_endpoint_model(primary_url, primary_tok, use_gcp_auth=use_gcp_auth),
         )
         if gpu_profile:
             (out_dir / "gpu_kernel_profile.json").write_text(json.dumps(gpu_profile, indent=2) + "\n", encoding="utf-8")
+        if model_introspect:
+            (out_dir / "model_introspection.json").write_text(json.dumps(model_introspect, indent=2) + "\n", encoding="utf-8")
 
-        best_cand = baseline_cand
-        best_res = base_res
-        best_val = base_res.metric_value(canon_metric)
-        (out_dir / "best_candidate.py").write_text(seed_source, encoding="utf-8")
-
-        append_results_tsv(tsv_path, 0, "seed_000", "baseline", baseline_cand, base_res)
-        plot_progress_chart(tsv_path, png_path, metric=canon_metric)
-        kept_history: list[dict[str, Any]] = []
+        plot_progress_chart(tsv_path, png_path, metric=canon_metric, stage_boundaries=stage_boundaries)
         write_articulated_summary(
             out_dir,
             metric=canon_metric,
@@ -388,17 +549,9 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
             best_cand=best_cand,
             best_res=best_res,
             kept_history=kept_history,
-            total_evaluated=0,
-            spend_usd=current_spend_usd(),
+            total_evaluated=prior_eval_offset,
+            spend_usd=cumulative_spend_usd(),
             state="IN_PROGRESS",
-        )
-        logger.info(
-            "[Eval #0] Baseline %s = %s | P99=%.2fms | P50=%.2fms | Throughput=%.2f req/s",
-            canon_metric,
-            format_metric(best_val, canon_metric),
-            base_res.p99_latency_ms,
-            base_res.p50_latency_ms,
-            base_res.throughput_rps,
         )
 
         # 3. Connect to Official Google Cloud AlphaEvolve (Discovery Engine API)
@@ -418,7 +571,7 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
             gpu_queue.put_nowait(w)
 
         ledger_lock = asyncio.Lock()
-        eval_counter = 0
+        eval_counter = prior_eval_offset
 
         async def evaluate_alpha_evolve_candidate(program_candidate: dict[str, Any]) -> dict[str, Any]:
             nonlocal eval_counter, best_cand, best_res, best_val, gpu_profile, ae_api_spend_est
@@ -477,6 +630,7 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
                         },
                     }
 
+                m_before = await scrape_engine_metrics(w_url, w_tok, use_gcp_auth=use_gcp_auth)
                 res = await evaluate_candidate_on_endpoint(
                     candidate_name=cand.name,
                     endpoint_url=w_url,
@@ -489,6 +643,8 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
                     model_name=served_model,
                     metric=canon_metric,
                 )
+                m_after = await scrape_engine_metrics(w_url, w_tok, use_gcp_auth=use_gcp_auth)
+                eng_delta = summarize_engine_metrics_delta(m_before, m_after)
 
                 if not res.equivalence.passed:
                     kl_pen = float(max(-800_000.0, -500_000.0 - 10_000.0 * res.equivalence.mean_kl_divergence))
@@ -578,7 +734,7 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
                         refresh_prof = True
 
                     append_results_tsv(tsv_path, it_num, prog_id[:10], status, cand, res)
-                    plot_progress_chart(tsv_path, png_path, metric=canon_metric)
+                    plot_progress_chart(tsv_path, png_path, metric=canon_metric, stage_boundaries=stage_boundaries)
                     write_articulated_summary(
                         out_dir,
                         metric=canon_metric,
@@ -587,7 +743,7 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
                         best_res=best_res,
                         kept_history=kept_history,
                         total_evaluated=it_num,
-                        spend_usd=current_spend_usd(),
+                        spend_usd=cumulative_spend_usd(),
                         experiment_name=experiment.experiment_name or "",
                         state="IN_PROGRESS",
                     )
@@ -608,7 +764,7 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
                         )
 
                 logger.info(
-                    "[Eval #%03d | w%d] %-7s | [%s] %s | %s=%s (best=%s) | P99=%.1fms | Tput=%.1f rps | spend=$%.2f",
+                    "[Eval #%03d | w%d] %-7s | [%s] %s | %s=%s (best=%s) | P99=%.1fms | Tput=%.1f rps | stage=$%.2f (tot=$%.2f)",
                     it_num,
                     w_idx,
                     status.upper(),
@@ -619,7 +775,8 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
                     format_metric(best_val, canon_metric),
                     res.p99_latency_ms,
                     res.throughput_rps,
-                    current_spend_usd(),
+                    stage_spend_usd(),
+                    cumulative_spend_usd(),
                 )
 
                 fitness = to_alpha_evolve_score(cand_val, canon_metric)
@@ -627,8 +784,9 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
                     f"t={int(b['start_sec'])}s:p99={b['p99_ms']:.0f}ms" for b in res.time_buckets[:6]
                 )
                 top_k_str = ", ".join(
-                    f"{k['kernel'][:48]} ({k['pct_gpu_time']:.1f}%)" for k in (gpu_profile or [])[:6]
+                    f"{k['kernel'][:48]} ({k['pct_gpu_time']:.1f}%)" for k in (gpu_profile or [])[:8]
                 )
+                eng_str = ", ".join(f"{k}={v}" for k, v in eng_delta.items()) if eng_delta else "n/a"
                 return {
                     "scores": {"scores": [{"metric": "fitness_score", "score": fitness}]},
                     "insights": {
@@ -637,13 +795,17 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
                                 "label": "Serving Telemetry",
                                 "text": (
                                     f"Target {canon_metric}={format_metric(cand_val, canon_metric)} "
-                                    f"(Baseline={format_metric(base_res.metric_value(canon_metric), canon_metric)}, "
+                                    f"(GroundZero#0={format_metric(base_res.metric_value(canon_metric), canon_metric)}, "
                                     f"CurrentBest={format_metric(best_val, canon_metric)}) | "
                                     f"P99={res.p99_latency_ms:.2f}ms, P50={res.p50_latency_ms:.2f}ms, "
                                     f"TTFT_P99={res.ttft_p99_ms:.2f}ms, PeakThroughput={res.throughput_rps:.2f} req/s | "
                                     f"KL={res.equivalence.mean_kl_divergence:.5f} (exact={res.equivalence.exact_slot_match_pct:.2f}%) | "
                                     f"30s Windows: [{bucket_str}]"
                                 ),
+                            },
+                            {
+                                "label": "Engine Internals (ITL / Queue / Decode / SpecDecode)",
+                                "text": eng_str,
                             },
                             {
                                 "label": "Top GPU CUDA Kernels",
@@ -660,6 +822,38 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
         prof_summary = json.dumps((gpu_profile or [])[:12], indent=2) if gpu_profile else "[]"
         dir_word = METRIC_INFO[canon_metric]["direction"].upper()
         score_expr = "`+throughput_rps`" if dir_word == "MAXIMIZE" else f"`-{canon_metric}_ms`"
+
+        gpu_detail = f"`{eff_accel}` (`x{eff_accel_count}` on `{eff_machine}`)"
+        if model_introspect.get("gpu_name"):
+            gpu_detail += f" — `{model_introspect['gpu_name']}` (SM `{model_introspect.get('sm_capability', '?')}`)"
+        dims_json = json.dumps(model_introspect.get("model_dims") or {}, indent=2)
+        vllm_mod_name = model_introspect.get("vllm_model_module", "")
+        hot_src = str(model_introspect.get("hot_layer_source") or "").strip()
+        internals_str = json.dumps(seed_engine_internals) if seed_engine_internals else "{}"
+
+        introspect_section = ""
+        if model_introspect.get("model_dims") or hot_src:
+            introspect_section = (
+                "\n## Live Introspected Model Dimensions & Target `vLLM` Layer Source\n"
+                f"- **Target `vLLM` Python Module:** `{vllm_mod_name or 'auto'}`\n"
+                f"- **Model Dimensions:**\n```json\n{dims_json}\n```\n"
+            )
+            if hot_src:
+                introspect_section += (
+                    "- **Active Model Layer Source (target for `register_vllm_patch` `@triton.jit` fusions):**\n"
+                    f"```python\n{hot_src}\n```\n"
+                )
+
+        stage_note = ""
+        if cont_dir is not None:
+            stage_note = (
+                f"- **Warm-Started Continuation (Stage 2 from Eval `#{prior_eval_offset}`):** "
+                f"Scheduler & attention flags in the seed program already reached `{best_val:.2f} ms` P99 "
+                f"(down from `{base_res.p99_latency_ms:.2f} ms`). Prioritize hardware `FP8` (`--quantization=fp8`, "
+                "`--kv-cache-dtype=fp8`), `--kernel-config`, GPU n-gram `--speculative-config`, `moe_tuned_config` "
+                "Triton tile tables, `--compilation-config`, and `@triton.jit` layer fusions!\n"
+            )
+
         full_problem_description = (
             f"{problem_guide}\n\n"
             "## Active Experiment Context\n"
@@ -667,8 +861,11 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
             f"AlphaEvolve maximizes `fitness_score` = {score_expr}.\n"
             f"- **Ground-Zero Baseline (`#0`):** P99=`{base_res.p99_latency_ms:.2f} ms`, "
             f"P50=`{base_res.p50_latency_ms:.2f} ms`, Peak Throughput=`{base_res.throughput_rps:.2f} req/s`.\n"
-            f"- **Hardware:** `{eff_accel}` (`x{eff_accel_count}` on `{eff_machine}`) serving `{baseline_cand.vllm_args[0]}`.\n"
-            f"- **Live Ground-Zero Top GPU CUDA Kernels:**\n```json\n{prof_summary}\n```\n"
+            f"- **Current Seed Record:** `{format_metric(best_val, canon_metric)}` | Engine Internals: `{internals_str}`.\n"
+            f"{stage_note}"
+            f"- **Hardware:** {gpu_detail} serving `{baseline_cand.vllm_args[0]}`.\n"
+            f"- **Live Top GPU CUDA Kernels:**\n```json\n{prof_summary}\n```\n"
+            f"{introspect_section}"
         )
 
         models_cfg = []
@@ -682,7 +879,7 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
             evaluator_function=evaluate_alpha_evolve_candidate,
             max_programs_evaluated=max_programs,
             budget_usd=args.budget_usd,
-            current_spend_fn=current_spend_usd,
+            current_spend_fn=stage_spend_usd,
             parallel_evaluation=False,  # Native async evaluator runs concurrently across `num_evaluators` tasks
         )
         experiment.create_experiment(
@@ -701,10 +898,10 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
                 },
             }
         )
-        seed_fitness = to_alpha_evolve_score(base_res.metric_value(canon_metric), canon_metric)
+        seed_fitness = to_alpha_evolve_score(best_val, canon_metric)
         experiment.create_initial_program(
             {
-                "content": {"files": [{"path": "candidate.py", "content": seed_source}]},
+                "content": {"files": [{"path": "candidate.py", "content": warm_seed_source}]},
                 "evaluation": {"scores": {"scores": [{"metric": "fitness_score", "score": seed_fitness}]}},
             }
         )
@@ -744,12 +941,17 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
             await asyncio.gather(watchdog_task, return_exceptions=True)
 
         # 5. Finalize articulated outputs + native `gcloud ai` rollout script
+        portable_image = (
+            eff_image.replace(args.project_id, "${GCP_PROJECT_ID}")
+            if args.project_id and args.project_id in eff_image
+            else eff_image
+        )
         rollout_sh = build_gcloud_rollout_command(
             best_cand,
-            project_id=args.project_id or "${GCP_PROJECT_ID}",
-            region=args.region or "${GCP_REGION:-us-central1}",
+            project_id="${GCP_PROJECT_ID}",
+            region="${GCP_REGION:-us-central1}",
             endpoint_id=ep_ids[0] if ep_ids else "${VERTEX_ENDPOINT_ID}",
-            image_uri=eff_image,
+            image_uri=portable_image,
             machine_type=eff_machine,
             accelerator_type=eff_accel,
             accelerator_count=eff_accel_count,
@@ -764,13 +966,18 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
             best_res=best_res,
             kept_history=kept_history,
             total_evaluated=eval_counter,
-            spend_usd=current_spend_usd(),
+            spend_usd=cumulative_spend_usd(),
             experiment_name=experiment.experiment_name or "",
             state="COMPLETED",
         )
+        prev_exp_ids = list(prior_summary.get("prior_experiment_ids") or [])
+        if prior_summary.get("alpha_evolve_experiment_id"):
+            prev_exp_ids.append(prior_summary["alpha_evolve_experiment_id"])
         run_meta = {
             "completed_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "alpha_evolve_experiment_id": (experiment.experiment_name or "").rsplit("/", 1)[-1],
+            "prior_experiment_ids": prev_exp_ids,
+            "stage_boundaries": stage_boundaries,
             "metric": canon_metric,
             "baseline_value": base_res.metric_value(canon_metric),
             "best_value": best_val,
@@ -784,8 +991,10 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
             "best_kl_divergence": best_res.equivalence.mean_kl_divergence,
             "best_exact_match_pct": best_res.equivalence.exact_slot_match_pct,
             "programs_evaluated": eval_counter,
+            "stage_programs_evaluated": eval_counter - prior_eval_offset,
             "kept_breakthroughs": kept_history,
-            "total_spend_usd": current_spend_usd(),
+            "stage_spend_usd": stage_spend_usd(),
+            "total_spend_usd": cumulative_spend_usd(),
             "out_dir": str(out_dir),
         }
         (out_dir / "optimization_summary.json").write_text(json.dumps(run_meta, indent=2) + "\n", encoding="utf-8")

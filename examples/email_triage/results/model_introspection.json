@@ -1,0 +1,8 @@
+{
+  "ok": true,
+  "gpu_name": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+  "sm_capability": "12.0",
+  "config_err": "'head_dim' is a per-layer attribute and may vary across layers. Access it via the individual layer configs instead (e.g. config.per_layer_config[i].head_dim). To read the global config value from config.head_dim anyway, set `allow_global_per_layer_attribute_access` to `True` on the config. Warning: only do this if the caller can safely handle heterogeneous configs; code that assumes a homogeneous model may use the global value incorrectly.",
+  "vllm_model_module": "vllm.model_executor.models.gemma4_mm",
+  "hot_layer_source": ""
+}

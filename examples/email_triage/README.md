@@ -13,4 +13,5 @@ Every request across all files uses a **100% unique user email sampled without r
 - `results.tsv` — Full evaluation ledger (`iteration`, `status`, `category`, `p99_latency_ms`, `p50_latency_ms`, `throughput_rps`, `mean_kl`).
 - `best_candidate.py` — Winning evolved `candidate.py` program (diff via `python optimize.py --diff`; roll out to Vertex AI via `bash examples/email_triage/results/gcloud_rollout.sh`).
 - `progress.png` — AlphaEvolve optimization trajectory chart.
+- `gpu_kernel_profile.json` & `gpu_kernel_profile_best.json` — Live PyTorch Kineto CUDA kernel profiles comparing baseline `BF16` vs. winning evolved `FP8` + tuned Triton `fused_moe_kernel` execution on `NVIDIA RTX PRO 6000` (`SM12.0`).
 - `unseen_validation.json` & `unseen_validation.png` — Side-by-side 30-minute unseen production replay telemetry and chart.
