@@ -11,15 +11,15 @@ from typing import Any
 
 
 # EVOLVE-BLOCK-START
-# IMPORTANT: Keep the function name `get_candidate_config` and return dict keys unchanged.
+# IMPORTANT: Keep the function name `get_candidate_config`.
+# Supported dict keys: plain_title, hypothesis, category, vllm_args, env_vars, moe_tuned_config, custom_kernel_code.
 def get_candidate_config() -> dict[str, Any]:
-    """Return the vLLM serving configuration and optional custom Triton GPU kernel."""
+    """Return the vLLM serving configuration, optional MoE tile schedule, and optional Triton GPU kernel."""
     return {
-        "plain_title": "Larger Batches and Conservative Seqs",
+        "plain_title": "Chunked Prefill 1024 + 4-Stage FP8 MoE Tiles",
         "hypothesis": (
-            "Reduce max-num-seqs to 128 to mitigate queueing congestion and avoid starving concurrency under high loads. "
-            "Increase max-num-batched-tokens to 16384 for massive prefill concurrency. "
-            "Switch to FLASH_ATTN which might be better optimized for Ada hardware than FlashInfer."
+            "Lowering long-prefill-token-threshold to 1024 and max-num-batched-tokens to 4096 reduces prefill "
+            "interference on decode ITL, while 4-stage FP8 MoE tiles with BLOCK_SIZE_N=128 at M=128..256 speed up fused_moe."
         ),
         "category": "vllm_flags",  # vllm_flags | cuda_graphs | backends | triton_kernels
         "vllm_args": [
@@ -28,43 +28,35 @@ def get_candidate_config() -> dict[str, Any]:
             "--host=0.0.0.0",
             "--port=8080",
             "--max-model-len=8192",
-            "--max-logprobs=5",
+            "--max-logprobs=16",
             "--gpu-memory-utilization=0.95",
-            "--enable-chunked-prefill",
-            "--long-prefill-token-threshold=2048",
+            "--quantization=fp8",
+            "--kv-cache-dtype=fp8",
             "--language-model-only",
-            "--max-num-batched-tokens=16384",
-            "--max-num-seqs=128",
-            "--enable-prefix-caching",
-            "--disable-uvicorn-access-log",
-            "--attention-backend=flash_attn",
             "--async-scheduling",
+            "--max-num-seqs=256",
+            "--max-num-batched-tokens=4096",
+            "--long-prefill-token-threshold=1024",
+            '--compilation-config={"cudagraph_capture_sizes":[1,2,4,8,16,24,32,40,48,56,64,72,80,88,96,104,112,120,128,136,144,152,160,168,176,184,192,200,208,216,224,232,240,248,256,384,512],"max_cudagraph_capture_size":512}',
+            "--disable-uvicorn-access-log",
         ],
         "env_vars": {
             "PYTHONUNBUFFERED": "1",
-            "TOKENIZERS_PARALLELISM": "true",
-            "OMP_NUM_THREADS": "8",
-            "TORCH_NUM_THREADS": "8",
-            "CUDA_DEVICE_MAX_CONNECTIONS": "1",
-            "VLLM_USE_V2_MODEL_RUNNER": "1",
+            "TOKENIZERS_PARALLELISM": "false",
         },
-        "custom_kernel_code": """
-import gc
-import torch
-try:
-    gc.disable()
-except Exception:
-    pass
-try:
-    torch.set_num_threads(8)
-    torch.set_num_interop_threads(1)
-except Exception:
-    pass
-try:
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
-except Exception:
-    pass
-""",
+        "moe_tuned_config": {
+            1: {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 1, "num_warps": 4, "num_stages": 4},
+            2: {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 1, "num_warps": 4, "num_stages": 4},
+            4: {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 1, "num_warps": 4, "num_stages": 4},
+            8: {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 1, "num_warps": 4, "num_stages": 4},
+            16: {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 8, "num_warps": 4, "num_stages": 4},
+            32: {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 8, "num_warps": 4, "num_stages": 4},
+            64: {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 8, "num_warps": 4, "num_stages": 4},
+            128: {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 8, "num_warps": 4, "num_stages": 4},
+            256: {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 8, "num_warps": 4, "num_stages": 4},
+            512: {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 8, "num_warps": 8, "num_stages": 4},
+            1024: {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 8, "num_warps": 8, "num_stages": 4},
+        },
+        "custom_kernel_code": "",
     }
 # EVOLVE-BLOCK-END

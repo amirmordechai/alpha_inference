@@ -11,42 +11,52 @@ from typing import Any
 
 
 # EVOLVE-BLOCK-START
-# IMPORTANT: Keep the function name `get_candidate_config` and return dict keys unchanged.
+# IMPORTANT: Keep the function name `get_candidate_config`.
+# Supported dict keys: plain_title, hypothesis, category, vllm_args, env_vars, moe_tuned_config, custom_kernel_code.
 def get_candidate_config() -> dict[str, Any]:
-    """Return the vLLM serving configuration and optional custom Triton GPU kernel."""
+    """Return the vLLM serving configuration, optional MoE tile schedule, and optional Triton GPU kernel."""
     return {
-        "plain_title": "Extreme Micro-Chunking with Async V2 Runner",
+        "plain_title": "FP8 Triton small-M MoE tiles + GPU N-gram spec",
         "hypothesis": (
-            "Crazy Idea: Obliterate head-of-line blocking by forcing extreme micro-chunking. "
-            "By setting max-num-batched-tokens to 1024 and long-prefill-token-threshold to 2, "
-            "we heavily chunk prefills, preventing decode stalls. We enable language-model-only "
-            "to safely bypass multimodal token budget constraints at such small batch limits, "
-            "and pair this with async scheduling and V2 Model Runner for relentless pipelining."
+            "Fix the b12x engine crash by switching to Triton FP8 MoE with custom "
+            "BLOCK_SIZE_M=16 tiles tailored for sparse expert routing, paired with "
+            "zero-VRAM ngram_gpu speculative decoding to cut sequential decode steps."
         ),
-        "category": "vllm_flags",
+        "category": "vllm_flags",  # vllm_flags | cuda_graphs | backends | triton_kernels
         "vllm_args": [
             "google/gemma-4-26B-A4B-it",
             "--served-model-name=google/gemma-4-26B-A4B-it",
             "--host=0.0.0.0",
             "--port=8080",
             "--max-model-len=8192",
-            "--max-logprobs=5",
-            "--gpu-memory-utilization=0.92",
+            "--max-logprobs=16",
+            "--gpu-memory-utilization=0.95",
             "--max-num-seqs=256",
-            "--enable-prefix-caching",
-            "--disable-uvicorn-access-log",
+            "--max-num-batched-tokens=4096",
+            "--quantization=fp8",
             "--language-model-only",
-            "--max-num-batched-tokens=1024",
-            "--long-prefill-token-threshold=2",
             "--async-scheduling",
+            '--kernel-config={"moe_backend":"triton","linear_backend":"auto","enable_flashinfer_autotune":true}',
+            '--speculative-config={"method":"ngram_gpu","num_speculative_tokens":3,"prompt_lookup_max":5,"prompt_lookup_min":2}',
+            '--compilation-config={"max_cudagraph_capture_size":512}',
+            "--disable-uvicorn-access-log",
         ],
+        "moe_tuned_config": {
+            1: {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 1, "num_warps": 4, "num_stages": 3},
+            2: {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 1, "num_warps": 4, "num_stages": 3},
+            4: {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 1, "num_warps": 4, "num_stages": 3},
+            8: {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 1, "num_warps": 4, "num_stages": 3},
+            16: {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 1, "num_warps": 4, "num_stages": 4},
+            32: {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 8, "num_warps": 4, "num_stages": 4},
+            64: {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 8, "num_warps": 4, "num_stages": 4},
+            128: {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 8, "num_warps": 4, "num_stages": 4},
+            256: {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 8, "num_warps": 4, "num_stages": 4},
+            512: {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 8, "num_warps": 8, "num_stages": 4},
+            1024: {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 8, "num_warps": 8, "num_stages": 4},
+        },
         "env_vars": {
             "PYTHONUNBUFFERED": "1",
             "TOKENIZERS_PARALLELISM": "true",
-            "VLLM_USE_V2_MODEL_RUNNER": "1",
-            "VLLM_ATTENTION_BACKEND": "FLASHINFER",
-            "CUDA_DEVICE_MAX_CONNECTIONS": "2",
-            "OMP_NUM_THREADS": "8",
         },
         "custom_kernel_code": "",
     }

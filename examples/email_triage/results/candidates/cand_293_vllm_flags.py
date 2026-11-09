@@ -11,16 +11,15 @@ from typing import Any
 
 
 # EVOLVE-BLOCK-START
-# IMPORTANT: Keep the function name `get_candidate_config` and return dict keys unchanged.
+# IMPORTANT: Keep the function name `get_candidate_config`.
+# Supported dict keys: plain_title, hypothesis, category, vllm_args, env_vars, moe_tuned_config, custom_kernel_code.
 def get_candidate_config() -> dict[str, Any]:
-    """Return the vLLM serving configuration and optional custom Triton GPU kernel."""
+    """Return the vLLM serving configuration, optional MoE tile schedule, and optional Triton GPU kernel."""
     return {
-        "plain_title": "Tune Concurrency and Batching for P99",
+        "plain_title": "Drop Spec Decoding to Slash MoE Batch Load 3x",
         "hypothesis": (
-            "Optimize P99 latency by lowering max-num-seqs to 128 to prevent queue overloading "
-            "and increasing gpu-memory-utilization to 0.95 to maximize KV cache. We also set "
-            "max-num-batched-tokens to 8192 and long-prefill-token-threshold to 2048 to balance "
-            "chunked prefill efficiency."
+            "At 16.9% acceptance (1.34 tok/step), 2-token speculation triples MoE token volume per step for only "
+            "34% more tokens. Dropping speculation cuts MoE batch load by 66% where fused_moe is 47.2% of GPU time."
         ),
         "category": "vllm_flags",  # vllm_flags | cuda_graphs | backends | triton_kernels
         "vllm_args": [
@@ -29,67 +28,33 @@ def get_candidate_config() -> dict[str, Any]:
             "--host=0.0.0.0",
             "--port=8080",
             "--max-model-len=8192",
-            "--max-logprobs=5",
+            "--max-logprobs=16",
             "--gpu-memory-utilization=0.95",
-            "--enable-chunked-prefill",
-            "--long-prefill-token-threshold=2048",
+            "--quantization=fp8",
+            "--kv-cache-dtype=fp8",
             "--language-model-only",
-            "--max-num-batched-tokens=8192",
-            "--max-num-seqs=128",
-            "--enable-prefix-caching",
-            "--disable-uvicorn-access-log",
-            "--attention-backend=flashinfer",
-            "--block-size=16",
             "--async-scheduling",
+            "--max-num-seqs=256",
+            "--max-num-batched-tokens=4096",
+            "--long-prefill-token-threshold=1024",
+            '--compilation-config={"cudagraph_capture_sizes":[1,2,4,8,16,24,32,40,48,56,64,72,80,88,96,104,112,120,128,136,144,152,160,168,176,184,192,200,208,216,224,232,240,248,256],"max_cudagraph_capture_size":256}',
+            "--disable-uvicorn-access-log",
         ],
         "env_vars": {
             "PYTHONUNBUFFERED": "1",
-            "TOKENIZERS_PARALLELISM": "true",
-            "OMP_NUM_THREADS": "4",
-            "TORCH_NUM_THREADS": "4",
-            "CUDA_DEVICE_MAX_CONNECTIONS": "1",
-            "VLLM_USE_V2_MODEL_RUNNER": "1",
+            "TOKENIZERS_PARALLELISM": "false",
         },
-        "custom_kernel_code": """
-import gc
-import sys
-import os
-import torch
-import builtins
-
-try:
-    gc.disable()
-except Exception:
-    pass
-
-try:
-    # Relax Python thread switching to significantly reduce GIL contention on background serving threads
-    sys.setswitchinterval(0.005)
-except Exception:
-    pass
-
-try:
-    # Pin process to available CPU cores for better cache locality and predictable execution
-    if hasattr(os, 'sched_getaffinity') and hasattr(os, 'sched_setaffinity'):
-        all_cpus = os.sched_getaffinity(0)
-        os.sched_setaffinity(0, all_cpus)
-except Exception:
-    pass
-
-try:
-    torch.set_num_threads(4)
-    torch.set_num_interop_threads(1)
-except Exception:
-    pass
-
-try:
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
-    torch.backends.cudnn.benchmark = True
-except Exception:
-    pass
-
-# Removed import hook monkey-patch to avoid overhead and instability.
-""",
+        "moe_tuned_config": {
+            m: {
+                "BLOCK_SIZE_M": 16 if m <= 512 else 64,
+                "BLOCK_SIZE_N": 64 if m <= 512 else 128,
+                "BLOCK_SIZE_K": 128,
+                "GROUP_SIZE_M": 1 if m <= 8 else 8,
+                "num_warps": 4 if m <= 512 else 8,
+                "num_stages": 4 if m <= 512 else 3,
+            }
+            for m in (1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024)
+        },
+        "custom_kernel_code": "",
     }
 # EVOLVE-BLOCK-END

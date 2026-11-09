@@ -1,111 +1,143 @@
 {
-  "completed_at_utc": "2026-11-08T14:10:55Z",
-  "alpha_evolve_experiment_id": "4156422443182074563",
-  "prior_experiment_ids": [
-    "8702438161969431074"
-  ],
-  "stage_boundaries": [
-    {
-      "stage": 2,
-      "start_iteration": 301,
-      "label": "Stage 2: FP8 + Speculative + Triton/MoE"
-    }
-  ],
+  "completed_at_utc": "2026-11-09T20:14:51Z",
+  "alpha_evolve_experiment_id": "13416136898898249762",
+  "prior_experiment_ids": [],
+  "stage_boundaries": [],
   "metric": "p99_latency",
-  "baseline_value": 8898.11,
-  "best_value": 3845.76,
-  "delta_pct": -56.78,
-  "baseline_p99_ms": 8898.11,
-  "best_p99_ms": 3845.76,
-  "baseline_throughput_rps": 23.95,
-  "best_throughput_rps": 36.85,
-  "best_kl_divergence": 0.00517,
-  "best_exact_match_pct": 99.58,
-  "programs_evaluated": 543,
-  "stage_programs_evaluated": 243,
+  "baseline_value": 8943.18,
+  "best_value": 3736.11,
+  "delta_pct": -58.22,
+  "baseline_p99_ms": 8943.18,
+  "best_p99_ms": 3736.11,
+  "baseline_throughput_rps": 23.85,
+  "best_throughput_rps": 38.41,
+  "best_kl_divergence": 0.00584,
+  "best_exact_match_pct": 99.45,
+  "programs_evaluated": 302,
+  "stage_programs_evaluated": 302,
   "kept_breakthroughs": [
     {
-      "iteration": 7,
-      "candidate_id": "8620583709",
+      "iteration": 1,
+      "candidate_id": "3199557650",
       "category": "backends",
-      "plain_title": "High-Throughput Low-Latency FlashInfer & Chunked Prefill",
-      "p99_latency_ms": 8608.4,
-      "p50_latency_ms": 5825.35,
-      "throughput_rps": 24.34,
-      "hypothesis": "Enable FlashInfer attention backend, chunked prefill, prefix caching, and tune thread variables to slash P99 latency and boost throughput."
+      "plain_title": "Online FP8 quantization and language-model-only",
+      "p99_latency_ms": 5431.73,
+      "p50_latency_ms": 3088.94,
+      "throughput_rps": 32.23,
+      "hypothesis": "Enabling online FP8 quantization cuts MoE and linear weight memory traffic in half and unlocks Blackwell FP8 Tensor Cores, while language-model-only removes unused multimodal vision overhead."
     },
     {
-      "iteration": 21,
-      "candidate_id": "8620583709",
-      "category": "vllm_flags",
-      "plain_title": "Async Scheduling & V2 Model Runner",
-      "p99_latency_ms": 8579.05,
-      "p50_latency_ms": 5811.47,
-      "throughput_rps": 24.07,
-      "hypothesis": "Enable async scheduling and V2 model runner to reduce CPU overhead and improve GPU utilization, minimizing P99 latency."
-    },
-    {
-      "iteration": 59,
-      "candidate_id": "8620583709",
-      "category": "vllm_flags",
-      "plain_title": "Max Batch Tokens 8k + GC & Priority Optimization",
-      "p99_latency_ms": 8578.65,
-      "p50_latency_ms": 5814.88,
-      "throughput_rps": 24.5,
-      "hypothesis": "Increase max-num-batched-tokens to 8192 to speed up the prefill stage, increase OMP threads, disable Python GC to eliminate micro-stutters, and raise OS process priority to minimize P99 tail latency."
-    },
-    {
-      "iteration": 106,
-      "candidate_id": "7149351168",
-      "category": "vllm_flags",
-      "plain_title": "Chunked Prefill Max Batch 4k + Global Grad Disable",
-      "p99_latency_ms": 8545.01,
-      "p50_latency_ms": 5832.28,
-      "throughput_rps": 24.16,
-      "hypothesis": "Lower max-num-batched-tokens to 4096 to reduce prefill-chunk size and limit step latency variance, disable PyTorch grad tracking globally to eliminate overhead, and set VLLM_LOGGING_LEVEL to WARNING to minimize logging-induced CPU stutters."
-    },
-    {
-      "iteration": 141,
-      "candidate_id": "7149351168",
-      "category": "vllm_flags",
-      "plain_title": "Chunked Prefill 2k + Block Size 32",
-      "p99_latency_ms": 8476.82,
-      "p50_latency_ms": 5804.24,
-      "throughput_rps": 21.8,
-      "hypothesis": "Reduce max-num-batched-tokens to 2048 to lower chunked prefill chunk size, and set block-size to 32 to improve FlashInfer page table tracking and alignment efficiency."
-    },
-    {
-      "iteration": 301,
-      "candidate_id": "1688356438",
+      "iteration": 6,
+      "candidate_id": "1866284744",
       "category": "backends",
-      "plain_title": "FP8 Online Quantization & FP8 KV Cache",
-      "p99_latency_ms": 4034.64,
-      "p50_latency_ms": 2413.18,
-      "throughput_rps": 37.97,
-      "hypothesis": "Enable online dynamic BF16->FP8 quantization to reduce weight memory traffic by 50% and unlock FP8 Tensor Core kernels on SM12.0. Also apply FP8 KV cache and autotuning."
+      "plain_title": "Online FP8 quantization and language-model-only",
+      "p99_latency_ms": 5406.01,
+      "p50_latency_ms": 3103.46,
+      "throughput_rps": 32.66,
+      "hypothesis": "Enabling online FP8 weight quantization cuts MoE and linear weight memory traffic in half and dispatches native Blackwell FP8 Tensor Core kernels, while --language-model-only drops unused multimodal vision weights."
     },
     {
-      "iteration": 315,
-      "candidate_id": "1688356438",
+      "iteration": 5,
+      "candidate_id": "1866284744",
       "category": "backends",
-      "plain_title": "FP8 + Triton MoE Tuning + N-gram Speculative Decoding",
-      "p99_latency_ms": 3913.16,
-      "p50_latency_ms": 2397.56,
-      "throughput_rps": 35.9,
-      "hypothesis": "Disable experimental V2 model runner to allow GPU N-gram speculative decoding on V1. Force Triton MoE backend to unlock customized low-padding tile configurations on Blackwell. Switch attention backend to auto for robust FP8 KV cache support, and expand prefill batching."
+      "plain_title": "FP8 online quant + GPU ngram spec + async LM",
+      "p99_latency_ms": 4938.56,
+      "p50_latency_ms": 2652.46,
+      "throughput_rps": 32.88,
+      "hypothesis": "Replace SM80 BF16 MoE/GEMM bottlenecks on Blackwell SM12.0 with online FP8 quantization, amortize sparse expert weight loads via GPU n-gram speculation, and enable async scheduling in language-model-only mode."
     },
     {
-      "iteration": 435,
-      "candidate_id": "6573128007",
+      "iteration": 49,
+      "candidate_id": "1866284744",
+      "category": "cuda_graphs",
+      "plain_title": "FP8 + N-Gram Spec + Sparse MoE Tile Schedule",
+      "p99_latency_ms": 4896.62,
+      "p50_latency_ms": 2640.74,
+      "throughput_rps": 32.63,
+      "hypothesis": "Tuning Triton fused_moe tile sizes (BLOCK_SIZE_M=16/32) for sparse E=128 expert routing on Blackwell SM12.0 alongside FP8 weights and GPU N-Gram speculation eliminates zero-padding waste in the dominant fused_moe_kernel (46.5% GPU time)."
+    },
+    {
+      "iteration": 128,
+      "candidate_id": "7618618190",
+      "category": "cuda_graphs",
+      "plain_title": "Exact-Divisor N=64 MoE Tiles + 3-Gram Spec",
+      "p99_latency_ms": 4887.12,
+      "p50_latency_ms": 2642.57,
+      "throughput_rps": 33.27,
+      "hypothesis": "Pinning BLOCK_SIZE_N=64 (exact divisor of moe_intermediate_size=704=11*64) and BLOCK_SIZE_M=16 up to M=256 (matching M*8/128=16 tokens/expert) while tightening ngram_gpu to min=3, tokens=2 cuts 2D tile padding and speculative MoE bloat."
+    },
+    {
+      "iteration": 164,
+      "candidate_id": "7618618190",
       "category": "backends",
-      "plain_title": "Optimized Triton MoE Tile Sizes + Enhanced Speculative D",
-      "p99_latency_ms": 3845.76,
-      "p50_latency_ms": 2290.09,
-      "throughput_rps": 36.85,
-      "hypothesis": "Further reduce padding waste in MoE Triton backend by shrinking BLOCK_SIZE_M for larger batch sizes. Increase speculative tokens to 4 to capitalize on the fast accept rate."
+      "plain_title": "FP8 Weights+KV + High-Occupancy MoE Tiles",
+      "p99_latency_ms": 4095.39,
+      "p50_latency_ms": 2557.82,
+      "throughput_rps": 38.98,
+      "hypothesis": "Adding --kv-cache-dtype=fp8 halves KV cache bandwidth in kernel_unified_attention (12.3% GPU time), while setting num_stages=3 and GROUP_SIZE_M=8 in moe_tuned_config improves L2 activation reuse and SM120 CTA occupancy for fused_moe_kernel (45.4% GPU time)."
+    },
+    {
+      "iteration": 172,
+      "candidate_id": "7618618190",
+      "category": "backends",
+      "plain_title": "FP8 KV+Weights + SM120 MoE Schedule & Graphs",
+      "p99_latency_ms": 3986.4,
+      "p50_latency_ms": 2478.83,
+      "throughput_rps": 38.34,
+      "hypothesis": "Enabling --kv-cache-dtype=fp8 halves KV bandwidth in kernel_unified_attention, while num_stages=3, GROUP_SIZE_M=8, prefill BLOCK_SIZE_N=128 in moe_tuned_config and 8-step CUDA graphs reduce ITL and P99."
+    },
+    {
+      "iteration": 193,
+      "candidate_id": "1466513091",
+      "category": "cuda_graphs",
+      "plain_title": "4-Stage FP8 MoE Schedule + 1024 Prefill Chunk",
+      "p99_latency_ms": 3971.07,
+      "p50_latency_ms": 2495.12,
+      "throughput_rps": 38.87,
+      "hypothesis": "Increasing FP8 fused_moe software pipelining to num_stages=4 hides SM120 weight memory latency on the 37.9% MoE bottleneck, while tightening long-prefill-token-threshold to 1024 reduces decode ITL stalls."
+    },
+    {
+      "iteration": 203,
+      "candidate_id": "1466513091",
+      "category": "vllm_flags",
+      "plain_title": "GPU N-Gram SpecDecode + FP8 + SM120 MoE",
+      "p99_latency_ms": 3920.93,
+      "p50_latency_ms": 2231.22,
+      "throughput_rps": 37.61,
+      "hypothesis": "Adding zero-VRAM GPU N-Gram speculative decoding (ngram_gpu, 3 speculative tokens) drafts multiple tokens per MoE and attention step, amortizing the 37.9% fused_moe_kernel weight loads and slashing decode P99."
+    },
+    {
+      "iteration": 210,
+      "candidate_id": "1466513091",
+      "category": "vllm_flags",
+      "plain_title": "GPU N-Gram Speculation + Dense 512 CUDA Graphs",
+      "p99_latency_ms": 3821.17,
+      "p50_latency_ms": 2232.99,
+      "throughput_rps": 37.01,
+      "hypothesis": "Zero-VRAM ngram_gpu speculative decoding amortizes memory-bound FP8 MoE expert weight loads across multiple verified tokens per step, while denser 256-512 CUDA graphs prevent graph padding overhead."
+    },
+    {
+      "iteration": 238,
+      "candidate_id": "1466513091",
+      "category": "vllm_flags",
+      "plain_title": "2-Token N-Gram Spec + Sparse M=512 MoE Tiles",
+      "p99_latency_ms": 3736.11,
+      "p50_latency_ms": 2251.66,
+      "throughput_rps": 38.41,
+      "hypothesis": "Trimming ngram_gpu speculation from 3 to 2 tokens cuts wasted verification tokens by 25% at 12.6% acceptance, while keeping BLOCK_SIZE_M=16 at the M=512 MoE bucket avoids tile padding cliffs."
     }
   ],
-  "stage_spend_usd": 47.8239,
-  "total_spend_usd": 136.2377,
+  "models_used": [
+    {
+      "name": "gemini-4-argon",
+      "weight": 1.0
+    }
+  ],
+  "input_tokens": 1801327,
+  "output_tokens": 676100,
+  "gpu_spend_usd": 78.0372,
+  "llm_token_spend_usd": 13.7442,
+  "stage_spend_usd": 91.7814,
+  "total_spend_usd": 91.7814,
   "out_dir": "examples/email_triage/results"
 }

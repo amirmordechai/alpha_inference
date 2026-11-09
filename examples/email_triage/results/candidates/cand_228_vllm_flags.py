@@ -11,15 +11,16 @@ from typing import Any
 
 
 # EVOLVE-BLOCK-START
-# IMPORTANT: Keep the function name `get_candidate_config` and return dict keys unchanged.
+# IMPORTANT: Keep the function name `get_candidate_config`.
+# Supported dict keys: plain_title, hypothesis, category, vllm_args, env_vars, moe_tuned_config, custom_kernel_code.
 def get_candidate_config() -> dict[str, Any]:
-    """Return the vLLM serving configuration and optional custom Triton GPU kernel."""
+    """Return the vLLM serving configuration, optional MoE tile schedule, and optional Triton GPU kernel."""
     return {
-        "plain_title": "Moderate Chunking (4K), Optimal Seq Count (256), Block Size 16, TF32 and GC tuning",
+        "plain_title": "FP8 Triton MoE SM120 tiles with GPU ngram spec",
         "hypothesis": (
-            "By scaling max-num-batched-tokens to 4096 and long-prefill-token-threshold to 1024, we reduce chunking overhead. "
-            "Setting max-num-seqs to 256 avoids scheduler thrashing. Reverting block-size to 16 matches flashinfer optimal layouts, "
-            "and enabling TF32 in PyTorch speeds up remaining linear ops. Disabling GC prevents latency spikes."
+            "Pairing FP8 Triton MoE tuned for SM120 shared-memory occupancy (BLOCK_SIZE_N=64, "
+            "num_stages=3) with zero-VRAM GPU n-gram speculative decoding reduces both per-step "
+            "MoE kernel time and total decode steps."
         ),
         "category": "vllm_flags",  # vllm_flags | cuda_graphs | backends | triton_kernels
         "vllm_args": [
@@ -28,38 +29,34 @@ def get_candidate_config() -> dict[str, Any]:
             "--host=0.0.0.0",
             "--port=8080",
             "--max-model-len=8192",
-            "--max-logprobs=5",
-            "--gpu-memory-utilization=0.92",
-            "--max-num-batched-tokens=4096",
-            "--max-num-seqs=256",
-            "--long-prefill-token-threshold=1024",
-            "--block-size=16",
-            "--enable-chunked-prefill",
-            "--enable-prefix-caching",
-            "--attention-backend=flashinfer",
+            "--max-logprobs=16",
+            "--gpu-memory-utilization=0.94",
+            "--quantization=fp8",
             "--async-scheduling",
+            "--language-model-only",
+            "--max-num-seqs=256",
+            "--max-num-batched-tokens=8192",
+            "--long-prefill-token-threshold=1024",
+            '--speculative-config={"method":"ngram_gpu","num_speculative_tokens":3,"prompt_lookup_max":5,"prompt_lookup_min":2}',
+            '--kernel-config={"moe_backend":"triton","enable_flashinfer_autotune":true}',
+            '--compilation-config={"max_cudagraph_capture_size":256,"cudagraph_capture_sizes":[1,2,4,8,16,24,32,40,48,56,64,72,80,88,96,104,112,120,128,144,160,176,192,208,224,240,256]}',
             "--disable-uvicorn-access-log",
         ],
         "env_vars": {
             "PYTHONUNBUFFERED": "1",
-            "OMP_NUM_THREADS": "12",
-            "TOKENIZERS_PARALLELISM": "true",
-            "CUDA_DEVICE_MAX_CONNECTIONS": "1",
+            "TOKENIZERS_PARALLELISM": "false",
         },
-        "custom_kernel_code": """
-try:
-    import gc
-    gc.disable()
-except Exception:
-    pass
-
-try:
-    import torch
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
-    torch.set_float32_matmul_precision('high')
-except Exception:
-    pass
-""",
+        "moe_tuned_config": {
+            m: {
+                "BLOCK_SIZE_M": 16 if m <= 128 else 32,
+                "BLOCK_SIZE_N": 64 if m <= 256 else 128,
+                "BLOCK_SIZE_K": 128,
+                "GROUP_SIZE_M": 8,
+                "num_warps": 4,
+                "num_stages": 3 if m <= 256 else 4,
+            }
+            for m in (1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024)
+        },
+        "custom_kernel_code": "",
     }
 # EVOLVE-BLOCK-END

@@ -11,9 +11,10 @@ from typing import Any
 
 
 # EVOLVE-BLOCK-START
-# IMPORTANT: Keep the function name `get_candidate_config` and return dict keys unchanged.
+# IMPORTANT: Keep the function name `get_candidate_config`.
+# Supported dict keys: plain_title, hypothesis, category, vllm_args, env_vars, moe_tuned_config, custom_kernel_code.
 def get_candidate_config() -> dict[str, Any]:
-    """Return the vLLM serving configuration and optional custom Triton GPU kernel."""
+    """Return the vLLM serving configuration, optional MoE tile schedule, and optional Triton GPU kernel."""
     return {
         "plain_title": "Out-of-the-box vLLM defaults",
         "hypothesis": (
@@ -33,6 +34,7 @@ def get_candidate_config() -> dict[str, Any]:
         "env_vars": {
             "PYTHONUNBUFFERED": "1",
         },
+        "moe_tuned_config": {},
         "custom_kernel_code": "",
     }
 # EVOLVE-BLOCK-END

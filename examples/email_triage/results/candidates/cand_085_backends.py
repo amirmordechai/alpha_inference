@@ -11,15 +11,16 @@ from typing import Any
 
 
 # EVOLVE-BLOCK-START
-# IMPORTANT: Keep the function name `get_candidate_config` and return dict keys unchanged.
+# IMPORTANT: Keep the function name `get_candidate_config`.
+# Supported dict keys: plain_title, hypothesis, category, vllm_args, env_vars, moe_tuned_config, custom_kernel_code.
 def get_candidate_config() -> dict[str, Any]:
-    """Return the vLLM serving configuration and optional custom Triton GPU kernel."""
+    """Return the vLLM serving configuration, optional MoE tile schedule, and optional Triton GPU kernel."""
     return {
-        "plain_title": "FlashInfer Attention with Prefix Caching",
+        "plain_title": "Blackwell B12X native kernels without tile table",
         "hypothesis": (
-            "Switching attention backend to FlashInfer while keeping prefix caching "
-            "enabled will speed up the shared-prefix attention calculation. We disable "
-            "chunked prefill to prevent splitting prefill requests which can increase P99 latency."
+            "Drop the entire hand-tuned Triton MoE tile dictionary and delegate MoE and "
+            "linear dispatch directly to native Blackwell SM120 b12x kernels with "
+            "FlashInfer autotune enabled."
         ),
         "category": "backends",  # vllm_flags | cuda_graphs | backends | triton_kernels
         "vllm_args": [
@@ -28,19 +29,20 @@ def get_candidate_config() -> dict[str, Any]:
             "--host=0.0.0.0",
             "--port=8080",
             "--max-model-len=8192",
-            "--max-logprobs=5",
+            "--max-logprobs=16",
             "--gpu-memory-utilization=0.95",
-            "--disable-uvicorn-access-log",
-            "--language-model-only",
-            "--enable-prefix-caching",
-            "--attention-backend=flashinfer",
             "--max-num-seqs=256",
+            "--max-num-batched-tokens=4096",
+            "--quantization=fp8",
+            "--language-model-only",
+            "--async-scheduling",
+            '--kernel-config={"moe_backend":"b12x","linear_backend":"b12x","enable_flashinfer_autotune":true}',
+            '--compilation-config={"max_cudagraph_capture_size":512}',
+            "--disable-uvicorn-access-log",
         ],
         "env_vars": {
             "PYTHONUNBUFFERED": "1",
             "TOKENIZERS_PARALLELISM": "true",
-            "OMP_NUM_THREADS": "4",
-            "CUDA_DEVICE_MAX_CONNECTIONS": "1",
         },
         "custom_kernel_code": "",
     }

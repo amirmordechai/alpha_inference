@@ -711,8 +711,7 @@ def plot_progress_chart(
     col = col_map[m]
     maximize = METRIC_INFO[m]["direction"] == "maximize"
 
-    xs_all, ys_all = [], []
-    xs_keep, ys_keep, titles_keep, cats_keep = [], [], [], []
+    raw_rows = []
     with tsv_path.open("r", encoding="utf-8") as fh:
         for row in csv.DictReader(fh, delimiter="\t"):
             it = int(row["iteration"])
@@ -720,16 +719,25 @@ def plot_progress_chart(
             st = row["status"]
             if (maximize and val <= 0.0) or (not maximize and val >= 90000.0):
                 continue
-            xs_all.append(it)
-            ys_all.append(val)
-            if st in ("baseline", "keep"):
-                xs_keep.append(it)
-                ys_keep.append(val)
-                titles_keep.append(row["plain_title"])
-                cats_keep.append(row["category"])
+            raw_rows.append((it, val, st, row["plain_title"], row["category"]))
 
-    if not xs_all:
+    if not raw_rows:
         return
+
+    raw_rows.sort(key=lambda t: (t[0], 0 if t[2] == "baseline" else 1))
+    xs_all, ys_all = [], []
+    xs_keep, ys_keep, titles_keep, cats_keep = [], [], [], []
+    best_so_far = float("-inf") if maximize else float("inf")
+    for it, val, st, title, cat in raw_rows:
+        xs_all.append(it)
+        ys_all.append(val)
+        improves = (val > best_so_far) if maximize else (val < best_so_far)
+        if st == "baseline" or (st == "keep" and improves):
+            best_so_far = val
+            xs_keep.append(it)
+            ys_keep.append(val)
+            titles_keep.append(title)
+            cats_keep.append(cat)
 
     base_val = ys_keep[0] if ys_keep else ys_all[0]
     best_val = ys_keep[-1] if ys_keep else min(ys_all)

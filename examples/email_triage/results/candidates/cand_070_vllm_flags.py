@@ -11,15 +11,16 @@ from typing import Any
 
 
 # EVOLVE-BLOCK-START
-# IMPORTANT: Keep the function name `get_candidate_config` and return dict keys unchanged.
+# IMPORTANT: Keep the function name `get_candidate_config`.
+# Supported dict keys: plain_title, hypothesis, category, vllm_args, env_vars, moe_tuned_config, custom_kernel_code.
 def get_candidate_config() -> dict[str, Any]:
-    """Return the vLLM serving configuration and optional custom Triton GPU kernel."""
+    """Return the vLLM serving configuration, optional MoE tile schedule, and optional Triton GPU kernel."""
     return {
-        "plain_title": "Prefix Caching + Chunked Prefill",
+        "plain_title": "FP8 weights with 512 CUDA graphs and batch tuning",
         "hypothesis": (
-            "Enabling chunked prefill with a chunk size of 4096 prevents long prefills "
-            "from starving concurrent decode iterations, directly minimizing P99 latency "
-            "under high load while preserving prefix caching and V2 runner."
+            "Extend CUDA graph capture up to 512 active tokens and bound max-num-batched-tokens "
+            "to 4096 alongside FP8 weight quantization to reduce decode launch overhead and "
+            "chunked-prefill tail latency spikes."
         ),
         "category": "vllm_flags",  # vllm_flags | cuda_graphs | backends | triton_kernels
         "vllm_args": [
@@ -28,20 +29,20 @@ def get_candidate_config() -> dict[str, Any]:
             "--host=0.0.0.0",
             "--port=8080",
             "--max-model-len=8192",
-            "--max-logprobs=5",
-            "--gpu-memory-utilization=0.95",
-            "--enable-prefix-caching",
-            "--max-num-seqs=256",
-            "--enable-chunked-prefill",
+            "--max-logprobs=16",
+            "--gpu-memory-utilization=0.94",
+            "--quantization=fp8",
+            "--async-scheduling",
+            "--language-model-only",
             "--max-num-batched-tokens=4096",
+            "--max-num-seqs=256",
+            '--compilation-config={"max_cudagraph_capture_size":512}',
             "--disable-uvicorn-access-log",
         ],
         "env_vars": {
             "PYTHONUNBUFFERED": "1",
-            "OMP_NUM_THREADS": "8",
-            "TOKENIZERS_PARALLELISM": "true",
-            "VLLM_USE_V2_MODEL_RUNNER": "1",
         },
+        "moe_tuned_config": {},
         "custom_kernel_code": "",
     }
 # EVOLVE-BLOCK-END

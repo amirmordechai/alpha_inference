@@ -11,14 +11,16 @@ from typing import Any
 
 
 # EVOLVE-BLOCK-START
-# IMPORTANT: Keep the function name `get_candidate_config` and return dict keys unchanged.
+# IMPORTANT: Keep the function name `get_candidate_config`.
+# Supported dict keys: plain_title, hypothesis, category, vllm_args, env_vars, moe_tuned_config, custom_kernel_code.
 def get_candidate_config() -> dict[str, Any]:
-    """Return the vLLM serving configuration and optional custom Triton GPU kernel."""
+    """Return the vLLM serving configuration, optional MoE tile schedule, and optional Triton GPU kernel."""
     return {
-        "plain_title": "Chunked Prefill 4k + GC Freeze",
+        "plain_title": "Uniform 128x128 MoE Tiles + 2-Token GPU N-Gram",
         "hypothesis": (
-            "Increase max-num-batched-tokens to 4096 to speed up prefill chunking (directly "
-            "addressing the TTFT-dominated P99 bottleneck), and use gc.freeze() to eliminate CoW overhead."
+            "Simplify MoE tile schedule by eliminating branching tile-size heuristics in favor of "
+            "uniform 16x128x128 FP8 tiles and pair with lightweight 2-token GPU N-gram speculation "
+            "to reduce decode steps without inflating MoE batch buckets."
         ),
         "category": "vllm_flags",  # vllm_flags | cuda_graphs | backends | triton_kernels
         "vllm_args": [
@@ -27,48 +29,34 @@ def get_candidate_config() -> dict[str, Any]:
             "--host=0.0.0.0",
             "--port=8080",
             "--max-model-len=8192",
-            "--max-logprobs=5",
-            "--gpu-memory-utilization=0.95",
-            "--attention-backend=flashinfer",
-            "--enable-chunked-prefill",
+            "--max-logprobs=16",
+            "--gpu-memory-utilization=0.94",
+            "--quantization=fp8",
             "--language-model-only",
-            "--max-num-batched-tokens=4096",
-            "--max-num-seqs=256",
-            "--block-size=32",
-            "--enable-prefix-caching",
-            "--disable-uvicorn-access-log",
             "--async-scheduling",
+            "--max-num-seqs=256",
+            "--max-num-batched-tokens=8192",
+            "--long-prefill-token-threshold=2048",
+            "--disable-uvicorn-access-log",
+            '--speculative-config={"method":"ngram_gpu","num_speculative_tokens":2,"prompt_lookup_max":5,"prompt_lookup_min":2}',
+            '--kernel-config={"enable_flashinfer_autotune":true}',
+            '--compilation-config={"max_cudagraph_capture_size":512}',
         ],
         "env_vars": {
             "PYTHONUNBUFFERED": "1",
-            "TOKENIZERS_PARALLELISM": "true",
-            "OMP_NUM_THREADS": "8",
-            "CUDA_DEVICE_MAX_CONNECTIONS": "1",
-            "VLLM_USE_V2_MODEL_RUNNER": "1",
-            "VLLM_LOGGING_LEVEL": "WARNING",
+            "TOKENIZERS_PARALLELISM": "false",
         },
-        "custom_kernel_code": """
-try:
-    import gc
-    gc.disable()
-    gc.freeze()
-except Exception:
-    pass
-
-try:
-    import os
-    os.nice(-10)
-except Exception:
-    pass
-
-try:
-    import torch
-    torch.set_grad_enabled(False)
-    torch.set_num_threads(8)
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
-except Exception:
-    pass
-""",
+        "moe_tuned_config": dict.fromkeys(
+            (1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024),
+            {
+                "BLOCK_SIZE_M": 16,
+                "BLOCK_SIZE_N": 128,
+                "BLOCK_SIZE_K": 128,
+                "GROUP_SIZE_M": 1,
+                "num_warps": 4,
+                "num_stages": 4,
+            },
+        ),
+        "custom_kernel_code": "",
     }
 # EVOLVE-BLOCK-END

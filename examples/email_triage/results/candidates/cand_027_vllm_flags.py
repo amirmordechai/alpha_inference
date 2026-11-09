@@ -11,14 +11,16 @@ from typing import Any
 
 
 # EVOLVE-BLOCK-START
-# IMPORTANT: Keep the function name `get_candidate_config` and return dict keys unchanged.
+# IMPORTANT: Keep the function name `get_candidate_config`.
+# Supported dict keys: plain_title, hypothesis, category, vllm_args, env_vars, moe_tuned_config, custom_kernel_code.
 def get_candidate_config() -> dict[str, Any]:
-    """Return the vLLM serving configuration and optional custom Triton GPU kernel."""
+    """Return the vLLM serving configuration, optional MoE tile schedule, and optional Triton GPU kernel."""
     return {
-        "plain_title": "Fine-Grained Chunked Prefill & Host Parallelism",
+        "plain_title": "Pure FP8 online quant + async LM without spec",
         "hypothesis": (
-            "Reduce max batched tokens to 2048 to yield smaller prefill chunks "
-            "and mitigate head-of-line blocking, combined with higher host OMP threads."
+            "Drop GPU n-gram speculation (which had only 12.6% acceptance while multiplying "
+            "decode token batch size by 4x across fused_moe_kernel and attention) to minimize "
+            "per-step ITL with pure online FP8, async scheduling, and language-model-only mode."
         ),
         "category": "vllm_flags",  # vllm_flags | cuda_graphs | backends | triton_kernels
         "vllm_args": [
@@ -27,25 +29,18 @@ def get_candidate_config() -> dict[str, Any]:
             "--host=0.0.0.0",
             "--port=8080",
             "--max-model-len=8192",
-            "--max-logprobs=5",
-            "--gpu-memory-utilization=0.95",
-            "--attention-backend=flashinfer",
-            "--enable-chunked-prefill",
+            "--max-logprobs=16",
+            "--gpu-memory-utilization=0.94",
+            "--quantization=fp8",
             "--language-model-only",
-            "--max-num-batched-tokens=2048",
-            "--long-prefill-token-threshold=1024",
-            "--max-num-seqs=256",
-            "--enable-prefix-caching",
-            "--disable-uvicorn-access-log",
             "--async-scheduling",
+            "--disable-uvicorn-access-log",
         ],
         "env_vars": {
             "PYTHONUNBUFFERED": "1",
-            "TOKENIZERS_PARALLELISM": "true",
-            "OMP_NUM_THREADS": "8",
-            "CUDA_DEVICE_MAX_CONNECTIONS": "1",
-            "VLLM_USE_V2_MODEL_RUNNER": "1",
+            "TOKENIZERS_PARALLELISM": "false",
         },
+        "moe_tuned_config": {},
         "custom_kernel_code": "",
     }
 # EVOLVE-BLOCK-END

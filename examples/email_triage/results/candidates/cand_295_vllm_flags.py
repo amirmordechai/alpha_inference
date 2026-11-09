@@ -11,84 +11,54 @@ from typing import Any
 
 
 # EVOLVE-BLOCK-START
-# IMPORTANT: Keep the function name `get_candidate_config` and return dict keys unchanged.
+# IMPORTANT: Keep the function name `get_candidate_config`.
+# Supported dict keys: plain_title, hypothesis, category, vllm_args, env_vars, moe_tuned_config, custom_kernel_code.
 def get_candidate_config() -> dict[str, Any]:
-    """Return the vLLM serving configuration and optional custom Triton GPU kernel."""
-    import inspect
-    
-    # Base arguments that are always safe and present in the best config
-    vllm_args = [
-        "google/gemma-4-26B-A4B-it",
-        "--served-model-name=google/gemma-4-26B-A4B-it",
-        "--host=0.0.0.0",
-        "--port=8080",
-        "--max-model-len=8192",
-        "--max-logprobs=5",
-        "--gpu-memory-utilization=0.95",
-        "--attention-backend=flashinfer",
-        "--language-model-only",
-        "--max-num-seqs=256",
-        "--block-size=16",
-        "--enable-prefix-caching",
-        "--disable-uvicorn-access-log",
-        "--async-scheduling",
-    ]
-    
-    # Try to dynamically inspect EngineArgs to use advanced features safely
-    try:
-        from vllm.engine.arg_utils import EngineArgs
-        params = inspect.signature(EngineArgs).parameters
-    except Exception:
-        params = {}
-        
-    # Dynamic Chunked Prefill tuning
-    # We use 4096 batched tokens and 1024 long prefill threshold to prevent decode starvation
-    if "enable_chunked_prefill" in params:
-        vllm_args.append("--enable-chunked-prefill")
-        vllm_args.append("--max-num-batched-tokens=4096")
-        if "long_prefill_token_threshold" in params:
-            vllm_args.append("--long-prefill-token-threshold=1024")
-    elif "chunked_prefill" in params:
-        vllm_args.append("--chunked-prefill")
-        vllm_args.append("--max-num-batched-tokens=4096")
-        if "long_prefill_token_threshold" in params:
-            vllm_args.append("--long-prefill-token-threshold=1024")
-    else:
-        # Fallback to standard chunked prefill arguments if introspection fails
-        vllm_args.append("--enable-chunked-prefill")
-        vllm_args.append("--max-num-batched-tokens=4096")
-        vllm_args.append("--long-prefill-token-threshold=1024")
-        
-    # Multi-step scheduling can drastically reduce CPU overhead and step latency.
-    # We lower it to 2 to significantly reduce prefill queueing delay (TTFT).
-    if "num_scheduler_steps" in params:
-        vllm_args.append("--num-scheduler-steps=2")
-        
-    # V2 block manager can improve memory allocation performance
-    if "use_v2_block_manager" in params:
-        vllm_args.append("--use-v2-block-manager")
-
-    # Sampler backend optimization
-    if "sampler_backend" in params:
-        vllm_args.append("--sampler-backend=flashinfer")
-        
+    """Return the vLLM serving configuration, optional MoE tile schedule, and optional Triton GPU kernel."""
     return {
-        "plain_title": "BlockSize 16 & Ultra-Low Scheduling Steps",
+        "plain_title": "High-Precision 3-Gram Spec + Full MoE Schedule",
         "hypothesis": (
-            "Reducing block-size to 16 to optimize FlashInfer's block layout and decrease memory fragmentation, "
-            "and lowering num-scheduler-steps to 2 to minimize scheduling interval and queueing delay for "
-            "incoming prefills, directly driving down P99 TTFT."
+            "Raising prompt_lookup_min from 2 to 3 eliminates spurious 2-gram speculations that caused 83% "
+            "verification token waste in fused_moe, while tuning M>=1024 MoE buckets prevents prefill tile cliffs."
         ),
         "category": "vllm_flags",  # vllm_flags | cuda_graphs | backends | triton_kernels
-        "vllm_args": vllm_args,
+        "vllm_args": [
+            "google/gemma-4-26B-A4B-it",
+            "--served-model-name=google/gemma-4-26B-A4B-it",
+            "--host=0.0.0.0",
+            "--port=8080",
+            "--max-model-len=8192",
+            "--max-logprobs=16",
+            "--gpu-memory-utilization=0.95",
+            "--quantization=fp8",
+            "--kv-cache-dtype=fp8",
+            "--language-model-only",
+            "--async-scheduling",
+            "--max-num-seqs=256",
+            "--max-num-batched-tokens=4096",
+            "--long-prefill-token-threshold=1024",
+            '--speculative-config={"method":"ngram_gpu","num_speculative_tokens":2,"prompt_lookup_max":5,"prompt_lookup_min":3}',
+            '--compilation-config={"cudagraph_capture_sizes":[1,2,4,8,16,24,32,40,48,56,64,72,80,88,96,104,112,120,128,136,144,152,160,168,176,184,192,200,208,216,224,232,240,248,256,272,288,304,320,336,352,368,384,400,416,432,448,464,480,496,512],"max_cudagraph_capture_size":512}',
+            "--disable-uvicorn-access-log",
+        ],
         "env_vars": {
             "PYTHONUNBUFFERED": "1",
-            "TOKENIZERS_PARALLELISM": "true",
-            "OMP_NUM_THREADS": "8",
-            "CUDA_DEVICE_MAX_CONNECTIONS": "1",
-            "VLLM_USE_FLASHINFER_SAMPLER": "1",
-            "VLLM_USE_V2_MODEL_RUNNER": "1",
-            "VLLM_LOGGING_LEVEL": "WARNING",
+            "TOKENIZERS_PARALLELISM": "false",
+        },
+        "moe_tuned_config": {
+            1: {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 1, "num_warps": 4, "num_stages": 4},
+            2: {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 1, "num_warps": 4, "num_stages": 4},
+            4: {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 1, "num_warps": 4, "num_stages": 4},
+            8: {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 1, "num_warps": 4, "num_stages": 4},
+            16: {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 8, "num_warps": 4, "num_stages": 4},
+            32: {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 8, "num_warps": 4, "num_stages": 4},
+            64: {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 8, "num_warps": 4, "num_stages": 4},
+            128: {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 8, "num_warps": 4, "num_stages": 4},
+            256: {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 8, "num_warps": 4, "num_stages": 4},
+            512: {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 8, "num_warps": 4, "num_stages": 4},
+            1024: {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 8, "num_warps": 4, "num_stages": 4},
+            2048: {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 8, "num_warps": 8, "num_stages": 4},
+            4096: {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 8, "num_warps": 8, "num_stages": 3},
         },
         "custom_kernel_code": "",
     }

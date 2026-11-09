@@ -168,10 +168,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--ae-location", default=os.getenv("AE_LOCATION", "global"), help="Discovery Engine location")
     p.add_argument("--region", default=os.getenv("GCP_REGION", os.getenv("GCP_REGION_GPU", "us-central1")), help="Vertex GPU region")
     p.add_argument("--ar-repo", default=os.getenv("GCP_AR_REPO", "geap-models"), help="Artifact Registry repo")
-    p.add_argument("--model-1", default=os.getenv("AE_MODEL_1", "gemini-3.5-flash"), help="Primary AlphaEvolve model")
-    p.add_argument("--model-1-weight", type=float, default=float(os.getenv("AE_MODEL_1_WEIGHT", "0.55")))
-    p.add_argument("--model-2", default=os.getenv("AE_MODEL_2", "gemini-3.1-pro-preview"), help="Secondary AlphaEvolve model")
-    p.add_argument("--model-2-weight", type=float, default=float(os.getenv("AE_MODEL_2_WEIGHT", "0.45")))
+    p.add_argument("--model-1", default=os.getenv("AE_MODEL_1", "gemini-4-argon"), help="Primary AlphaEvolve model")
+    p.add_argument("--model-1-weight", type=float, default=float(os.getenv("AE_MODEL_1_WEIGHT", "1.0")))
+    p.add_argument("--model-2", default=os.getenv("AE_MODEL_2", ""), help="Optional secondary AlphaEvolve model")
+    p.add_argument("--model-2-weight", type=float, default=float(os.getenv("AE_MODEL_2_WEIGHT", "0.0")))
 
     p.add_argument("--out-dir", default="examples/email_triage/results", help="Output directory for articulated results")
     p.add_argument(
@@ -314,17 +314,39 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
     t_start = time.perf_counter()
     provisioned_endpoint_ids: list[str] = []
     worker_pool: list[tuple[int, str, str]] = []
-    ae_api_spend_est = 0.0
+    ae_token_state = {"input_tokens": 0, "output_tokens": 0, "llm_spend_usd": 0.0}
 
-    def stage_spend_usd() -> float:
+    def _estimate_llm_spend(in_toks: int, out_toks: int) -> float:
+        # Weighted USD/1M rate across configured AlphaEvolve models (Argon ~$2/$15, 3.1-Pro ~$2/$12, 3.5-Flash ~$1.5/$9)
+        rates = {
+            "gemini-4-argon": (2.0, 15.0),
+            "gemini-3.1-pro-preview": (2.0, 12.0),
+            "gemini-3.5-flash": (1.5, 9.0),
+            "gemini-2.5-flash": (0.3, 2.5),
+        }
+        m1 = (args.model_1 or "gemini-4-argon").strip()
+        w1 = max(0.0, float(args.model_1_weight or 1.0))
+        m2 = (args.model_2 or "").strip()
+        w2 = max(0.0, float(args.model_2_weight or 0.0)) if (m2 and m2 != m1) else 0.0
+        tot_w = max(1e-6, w1 + w2)
+        r1_in, r1_out = rates.get(m1, (2.0, 15.0))
+        r2_in, r2_out = rates.get(m2, (2.0, 12.0)) if w2 > 0 else (0.0, 0.0)
+        eff_in = (w1 * r1_in + w2 * r2_in) / tot_w
+        eff_out = (w1 * r1_out + w2 * r2_out) / tot_w
+        return round((in_toks / 1_000_000.0) * eff_in + (out_toks / 1_000_000.0) * eff_out, 4)
+
+    def stage_gpu_spend_usd() -> float:
         tracks_vertex_gpus = args.deploy_vertex or any(
             (":rawPredict" in u or "vertexai" in u) for _, u, _ in worker_pool
         )
         if not tracks_vertex_gpus:
-            return round(ae_api_spend_est, 4)
+            return 0.0
         hrs = (time.perf_counter() - t_start) / 3600.0
         n_gpus = max(1, len(worker_pool) if worker_pool else num_workers)
-        return round(hrs * args.hourly_gpu_usd * n_gpus + ae_api_spend_est, 4)
+        return round(hrs * args.hourly_gpu_usd * n_gpus, 4)
+
+    def stage_spend_usd() -> float:
+        return round(stage_gpu_spend_usd() + float(ae_token_state["llm_spend_usd"]), 4)
 
     def cumulative_spend_usd() -> float:
         return round(prior_spend_usd + stage_spend_usd(), 4)
@@ -574,8 +596,9 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
         eval_counter = prior_eval_offset
 
         async def evaluate_alpha_evolve_candidate(program_candidate: dict[str, Any]) -> dict[str, Any]:
-            nonlocal eval_counter, best_cand, best_res, best_val, gpu_profile, ae_api_spend_est
-            ae_api_spend_est += 0.04
+            nonlocal eval_counter, best_cand, best_res, best_val, gpu_profile
+            if ae_token_state["input_tokens"] == 0 and ae_token_state["output_tokens"] == 0:
+                ae_token_state["llm_spend_usd"] = round(float(ae_token_state["llm_spend_usd"]) + 0.15, 4)
             prog_id = str(program_candidate.get("name", "unknown")).rsplit("/", 1)[-1]
             files = (program_candidate.get("content") or {}).get("files") or []
             code = files[0].get("content", "") if files else ""
@@ -869,10 +892,10 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
         )
 
         models_cfg = []
-        if args.model_1:
-            models_cfg.append({"name": args.model_1, "weight": round(args.model_1_weight, 2)})
-        if args.model_2 and args.model_2 != args.model_1:
-            models_cfg.append({"name": args.model_2, "weight": round(args.model_2_weight, 2)})
+        if args.model_1 and args.model_1.strip():
+            models_cfg.append({"name": args.model_1.strip(), "weight": round(max(0.01, args.model_1_weight), 2)})
+        if args.model_2 and args.model_2.strip() and args.model_2.strip() != args.model_1.strip() and args.model_2_weight > 0:
+            models_cfg.append({"name": args.model_2.strip(), "weight": round(args.model_2_weight, 2)})
 
         experiment = BudgetedAlphaEvolveExperiment(
             ae_client=ae_client,
@@ -908,6 +931,14 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
         experiment.start_experiment()
         logger.info("Started Official AlphaEvolve Experiment: %s", experiment.experiment_name)
 
+        def _refresh_token_stats(exp_info: dict[str, Any] | None) -> None:
+            stats = (exp_info or {}).get("stats") or {}
+            in_t = int(stats.get("inputTokenCount") or 0)
+            out_t = int(stats.get("outputTokenCount") or 0)
+            ae_token_state["input_tokens"] = in_t
+            ae_token_state["output_tokens"] = out_t
+            ae_token_state["llm_spend_usd"] = _estimate_llm_spend(in_t, out_t)
+
         async def _auto_resume_watchdog() -> None:
             while not experiment.stopping_criteria_met():
                 await asyncio.sleep(30.0)
@@ -917,6 +948,7 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
                     info = await asyncio.to_thread(
                         ae_client.get_alpha_evolve_experiment, experiment.experiment_name
                     )
+                    _refresh_token_stats(info)
                     st = str((info or {}).get("state", "")).strip().upper()
                     if "PAUSED" in st and not experiment.stopping_criteria_met():
                         logger.warning("AlphaEvolve experiment entered PAUSED state; calling resume_experiment()...")
@@ -939,6 +971,14 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
         finally:
             watchdog_task.cancel()
             await asyncio.gather(watchdog_task, return_exceptions=True)
+            if experiment.experiment_name:
+                try:
+                    final_info = await asyncio.to_thread(
+                        ae_client.get_alpha_evolve_experiment, experiment.experiment_name
+                    )
+                    _refresh_token_stats(final_info)
+                except Exception:  # noqa: BLE001
+                    pass
 
         # 5. Finalize articulated outputs + native `gcloud ai` rollout script
         portable_image = (
@@ -993,6 +1033,11 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
             "programs_evaluated": eval_counter,
             "stage_programs_evaluated": eval_counter - prior_eval_offset,
             "kept_breakthroughs": kept_history,
+            "models_used": models_cfg,
+            "input_tokens": int(prior_summary.get("input_tokens", 0)) + int(ae_token_state["input_tokens"]),
+            "output_tokens": int(prior_summary.get("output_tokens", 0)) + int(ae_token_state["output_tokens"]),
+            "gpu_spend_usd": round(float(prior_summary.get("gpu_spend_usd", prior_spend_usd)) + stage_gpu_spend_usd(), 4),
+            "llm_token_spend_usd": round(float(prior_summary.get("llm_token_spend_usd", 0.0)) + float(ae_token_state["llm_spend_usd"]), 4),
             "stage_spend_usd": stage_spend_usd(),
             "total_spend_usd": cumulative_spend_usd(),
             "out_dir": str(out_dir),

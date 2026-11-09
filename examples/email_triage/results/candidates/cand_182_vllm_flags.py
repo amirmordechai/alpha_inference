@@ -11,17 +11,15 @@ from typing import Any
 
 
 # EVOLVE-BLOCK-START
-# IMPORTANT: Keep the function name `get_candidate_config` and return dict keys unchanged.
+# IMPORTANT: Keep the function name `get_candidate_config`.
+# Supported dict keys: plain_title, hypothesis, category, vllm_args, env_vars, moe_tuned_config, custom_kernel_code.
 def get_candidate_config() -> dict[str, Any]:
-    """Return the vLLM serving configuration and optional custom Triton GPU kernel."""
+    """Return the vLLM serving configuration, optional MoE tile schedule, and optional Triton GPU kernel."""
     return {
-        "plain_title": "Chunked Prefill Latency Smoothing",
+        "plain_title": "2-token GPU n-gram speculation + M=16 MoE tiles",
         "hypothesis": (
-            "By reducing max-num-batched-tokens from 16384 to 4096 and lowering "
-            "long-prefill-token-threshold to 2048, we break down large prefill tasks "
-            "into smaller chunks. This avoids several-second stalls in decode steps, "
-            "directly reducing P99 latency while maintaining high concurrency via "
-            "max-num-seqs=256 and prefix caching."
+            "At E=128, top_k=8, 2-token ngram_gpu speculation keeps tokens_per_expert <= 16 inside existing "
+            "BLOCK_SIZE_M=16 tiles, cutting sequential decode steps with minimal MoE verification overhead."
         ),
         "category": "vllm_flags",  # vllm_flags | cuda_graphs | backends | triton_kernels
         "vllm_args": [
@@ -30,26 +28,51 @@ def get_candidate_config() -> dict[str, Any]:
             "--host=0.0.0.0",
             "--port=8080",
             "--max-model-len=8192",
-            "--max-logprobs=5",
+            "--max-logprobs=16",
             "--gpu-memory-utilization=0.95",
-            "--attention-backend=flashinfer",
-            "--language-model-only",
             "--max-num-seqs=256",
-            "--enable-chunked-prefill",
             "--max-num-batched-tokens=4096",
-            "--long-prefill-token-threshold=2048",
-            "--block-size=16",
-            "--enable-prefix-caching",
-            "--disable-uvicorn-access-log",
+            "--long-prefill-token-threshold=1024",
+            "--quantization=fp8",
+            "--language-model-only",
             "--async-scheduling",
+            '--speculative-config={"method":"ngram_gpu","num_speculative_tokens":2,"prompt_lookup_max":5,"prompt_lookup_min":2}',
+            '--kernel-config={"moe_backend":"triton","enable_flashinfer_autotune":true}',
+            '--compilation-config={"max_cudagraph_capture_size":512,"cudagraph_capture_sizes":[1,2,4,8,16,24,32,48,64,80,96,112,128,160,192,224,256,320,384,448,512]}',
+            "--disable-uvicorn-access-log",
         ],
         "env_vars": {
             "PYTHONUNBUFFERED": "1",
-            "TOKENIZERS_PARALLELISM": "true",
-            "OMP_NUM_THREADS": "8",
-            "CUDA_DEVICE_MAX_CONNECTIONS": "2",
-            "VLLM_USE_FLASHINFER_SAMPLER": "1",
-            "VLLM_USE_V2_MODEL_RUNNER": "1",
+            "TOKENIZERS_PARALLELISM": "false",
+        },
+        "moe_tuned_config": {
+            **dict.fromkeys(
+                (1, 2, 4, 8, 16, 32, 64, 128, 256),
+                {
+                    "BLOCK_SIZE_M": 16,
+                    "BLOCK_SIZE_N": 64,
+                    "BLOCK_SIZE_K": 128,
+                    "GROUP_SIZE_M": 1,
+                    "num_warps": 4,
+                    "num_stages": 5,
+                },
+            ),
+            512: {
+                "BLOCK_SIZE_M": 32,
+                "BLOCK_SIZE_N": 128,
+                "BLOCK_SIZE_K": 128,
+                "GROUP_SIZE_M": 8,
+                "num_warps": 4,
+                "num_stages": 4,
+            },
+            1024: {
+                "BLOCK_SIZE_M": 64,
+                "BLOCK_SIZE_N": 128,
+                "BLOCK_SIZE_K": 128,
+                "GROUP_SIZE_M": 8,
+                "num_warps": 8,
+                "num_stages": 4,
+            },
         },
         "custom_kernel_code": "",
     }

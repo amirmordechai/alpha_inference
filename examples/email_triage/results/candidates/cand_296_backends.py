@@ -11,16 +11,16 @@ from typing import Any
 
 
 # EVOLVE-BLOCK-START
-# IMPORTANT: Keep the function name `get_candidate_config` and return dict keys unchanged.
+# IMPORTANT: Keep the function name `get_candidate_config`.
+# Supported dict keys: plain_title, hypothesis, category, vllm_args, env_vars, moe_tuned_config, custom_kernel_code.
 def get_candidate_config() -> dict[str, Any]:
-    """Return the vLLM serving configuration and optional custom Triton GPU kernel."""
+    """Return the vLLM serving configuration, optional MoE tile schedule, and optional Triton GPU kernel."""
     return {
-        "plain_title": "FlashInfer Chunked Prefill with 2K Tokens",
+        "plain_title": "SM120 b12x MoE and Linear Kernel Backends",
         "hypothesis": (
-            "By lowering --max-num-batched-tokens to 2048 and setting --long-prefill-token-threshold to 1024 "
-            "while keeping chunked prefill enabled, we reduce the size of individual prefill chunks. "
-            "This significantly mitigates prefill-decode interference and allows decode steps to be "
-            "scheduled more frequently, lowering overall P99 latency."
+            "fused_moe_kernel consumes 47.2% of GPU time and cutlass FP8 GEMM consumes 17.3% on "
+            "RTX PRO 6000 Blackwell (SM120). Dispatching moe_backend and linear_backend to b12x "
+            "leverages native SM120 Blackwell tensor core instructions to reduce decode ITL."
         ),
         "category": "backends",  # vllm_flags | cuda_graphs | backends | triton_kernels
         "vllm_args": [
@@ -29,22 +29,33 @@ def get_candidate_config() -> dict[str, Any]:
             "--host=0.0.0.0",
             "--port=8080",
             "--max-model-len=8192",
-            "--max-logprobs=5",
-            "--gpu-memory-utilization=0.95",
-            "--enable-prefix-caching",
-            "--disable-uvicorn-access-log",
+            "--max-logprobs=16",
+            "--gpu-memory-utilization=0.94",
+            "--quantization=fp8",
             "--language-model-only",
+            "--async-scheduling",
             "--max-num-seqs=256",
-            "--max-num-batched-tokens=2048",
-            "--long-prefill-token-threshold=1024",
-            "--enable-chunked-prefill",
-            "--attention-backend=FLASHINFER",
+            "--max-num-batched-tokens=8192",
+            "--long-prefill-token-threshold=2048",
+            "--disable-uvicorn-access-log",
+            '--kernel-config={"moe_backend":"b12x","linear_backend":"b12x","enable_flashinfer_autotune":true}',
+            '--compilation-config={"max_cudagraph_capture_size":512}',
         ],
         "env_vars": {
             "PYTHONUNBUFFERED": "1",
-            "OMP_NUM_THREADS": "8",
-            "TOKENIZERS_PARALLELISM": "true",
+            "TOKENIZERS_PARALLELISM": "false",
         },
+        "moe_tuned_config": dict.fromkeys(
+            (1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024),
+            {
+                "BLOCK_SIZE_M": 16,
+                "BLOCK_SIZE_N": 64,
+                "BLOCK_SIZE_K": 128,
+                "GROUP_SIZE_M": 1,
+                "num_warps": 4,
+                "num_stages": 4,
+            },
+        ),
         "custom_kernel_code": "",
     }
 # EVOLVE-BLOCK-END
