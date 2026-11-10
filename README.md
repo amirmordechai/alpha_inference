@@ -1,6 +1,11 @@
-# `alpha_inference` — GenAI Inference Optimization with Google Cloud AlphaEvolve
+# `alpha_inference`: Autonomous AI Inference Optimization with Google Cloud AlphaEvolve
+### Automatically tune `vLLM`, GPU kernels, CUDA graphs, and quantization for your exact `GPU × Model × Workload` — with zero quality loss
 
-`alpha_inference` connects **official Google Cloud AlphaEvolve** (`Google-Cloud-AI/alphaevolve-on-googlecloud`) to any **Vertex AI GPU Endpoint** (or **GPU VM**) to automatically discover faster `vLLM` inference flags, CUDA graph capture ladders, runtime backends, and custom `@triton.jit` GPU kernels for your own workload.
+<p align="center">
+  <img src="docs/assets/overview_flow.png" alt="End-to-End Overview: Baseline Endpoint to AlphaEvolve Search Loop with Metric Choice, Budget & Quality Gate" width="100%">
+</p>
+
+`alpha_inference` connects [**Google Cloud AlphaEvolve**](https://cloud.google.com/blog/products/ai-machine-learning/alphaevolve-is-available-for-everyone) ([docs](https://docs.cloud.google.com/gemini/enterprise/docs/alphaevolve/developer-guide/overview) · [code examples](https://github.com/Google-Cloud-AI/alphaevolve-on-googlecloud/tree/main/examples)) to any **Vertex AI GPU Endpoint** (or **GPU VM**) to automatically discover faster `vLLM` inference flags, quantization settings, CUDA graph capture ladders, runtime backends, and custom `@triton.jit` GPU kernels for your own workload.
 
 Works across **any GPU** (`L4`, `A100`, `H100`, `RTX PRO 6000`, single- or multi-GPU `TP`), **any `vLLM`-supported model**, and **any OpenAI-compatible JSONL workload trace** — with every candidate verified behind a **Layer-2 Token-Logprob KL Equivalence Gate** so speedups never degrade output quality.
 
@@ -32,7 +37,7 @@ Before running live cloud optimization, ensure your Google Cloud project has:
      --project=$GCP_PROJECT_ID
    ```
 2. **Gemini Enterprise with Google Cloud AlphaEvolve (`GE_APP_ID`):**
-   - An active **Gemini Enterprise** (Discovery Engine) app (`locations/global/collections/default_collection/engines/<GE_APP_ID>`) with the **AlphaEvolve API** enabled (`Google-Cloud-AI/alphaevolve-on-googlecloud`).
+   - An active **Gemini Enterprise** (Discovery Engine) app (`locations/global/collections/default_collection/engines/<GE_APP_ID>`) with the **AlphaEvolve API** enabled ([developer guide](https://docs.cloud.google.com/gemini/enterprise/docs/alphaevolve/developer-guide/overview) · [`alphaevolve-on-googlecloud`](https://github.com/Google-Cloud-AI/alphaevolve-on-googlecloud)).
 3. **Required GCP IAM Roles** (on your user identity or Service Account):
    - `roles/aiplatform.user` — Inspect, create, deploy, query (`:rawPredict`), and tear down Vertex AI Models & Endpoints.
    - `roles/discoveryengine.admin` *(or `roles/discoveryengine.editor`)* — Create and run AlphaEvolve experiments in Gemini Enterprise.
@@ -126,7 +131,20 @@ bash results/my_workload/gcloud_rollout.sh
 | `--trace` | Path to any OpenAI-compatible JSONL request trace (`messages`/`prompt` + `timestamp`). |
 | `--metric` | `p99_latency` *(minimize)*, `latency` *(minimize P50)*, `throughput` *(maximize req/s)*, `ttft` *(minimize P99 Time-To-First-Token)*. |
 | `--continue-from` | Warm-start a new optimization stage from a prior results directory, stitching `results.tsv`, `progress.png`, and cumulative spend while preserving the Ground-Zero `#0` KL baseline. |
-| `--budget-usd` | Hard USD cloud-spend circuit breaker (`BudgetedAlphaEvolveExperiment`). |
+| `--budget-usd` | Hard USD cloud-spend circuit breaker (`BudgetedAlphaEvolveExperiment`, tracking combined GPU hours + AlphaEvolve LLM tokens). |
+
+---
+
+## Included Reference Benchmark (`examples/email_triage/`)
+
+See **[`examples/email_triage/README.md`](examples/email_triage/README.md)** and **[`examples/email_triage/results/summary.md`](examples/email_triage/results/summary.md)** for full traces, all `302` evaluated candidates, Kineto GPU kernel profiles, and side-by-side 30-minute unseen validation (`Gemma 4 26B A4B IT` on `1x NVIDIA RTX PRO 6000`, `~$92` total search spend: `$78` GPU hours + `$14` AlphaEvolve tokens):
+
+| Evaluation Split | Metric | Out-of-the-Box `vLLM` (`#0`) | AlphaEvolve Best (`#238`) | Delta |
+| :--- | :--- | ---: | ---: | ---: |
+| **Monday 9 AM Peak (`3,956` emails)** | **P99 Latency** | `8,943.18 ms` | **`3,736.11 ms`** | **`-58.2%`** |
+| **Unseen Tuesday 9 AM (`19,800` emails, 30m)** | **Median (`P50`) Latency** | `9,111.75 ms` | **`3,419.41 ms`** | **`-62.5%`** |
+| **Unseen Tuesday 9 AM (`19,800` emails, 30m)** | **Sustained Throughput** | `25.16 req/s` | **`40.76 req/s`** | **`+62.0%`** |
+| **Unseen Tuesday 9 AM (`19,800` emails, 30m)** | **Output Equivalence** | `100.0%` | **`99.54%` exact match** | `mean_kl = 0.00561` |
 
 ---
 
@@ -148,7 +166,9 @@ RUN_LIVE_VERTEX_E2E=1 pytest -v -k live_e2e
 ```text
 alpha_inference/
 ├── AGENTS.md                   # Coding agent overview & guardrails
+├── LICENSE                     # Apache-2.0 License
 ├── .agents/skills/             # Agent onboarding skill (`alpha-inference/SKILL.md`)
+├── docs/assets/                # README architecture & overview diagrams
 ├── optimize.py                 # Official Google Cloud AlphaEvolve optimization CLI
 ├── validate.py                 # Side-by-side 1:1 real-time unseen trace validator
 ├── candidate.py                # Seed program (# EVOLVE-BLOCK-START ... # EVOLVE-BLOCK-END)
@@ -166,3 +186,9 @@ alpha_inference/
 └── tests/
     └── test_alpha_inference.py # Offline unit suite + opt-in live `gcloud ai` E2E test
 ```
+
+---
+
+## Disclaimer
+
+Disclaimer: This code is provided "as-is" as a demonstration only to illustrate a potential solution. The code does not constitute a Google product or service of any kind, and Google offers no support, warranties, or liability of any kind with its regard. Whoever chooses to use this code accepts all responsibility related to it, including for its implementation, use, and ongoing maintenance. For the avoidance of doubt, this code is not eligible for the Google Open Source Software Vulnerability Rewards Program.

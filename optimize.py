@@ -167,8 +167,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--ge-app-id", default=os.getenv("GE_APP_ID", ""), help="Gemini Enterprise App / Engine ID")
     p.add_argument("--ae-location", default=os.getenv("AE_LOCATION", "global"), help="Discovery Engine location")
     p.add_argument("--region", default=os.getenv("GCP_REGION", os.getenv("GCP_REGION_GPU", "us-central1")), help="Vertex GPU region")
-    p.add_argument("--ar-repo", default=os.getenv("GCP_AR_REPO", "geap-models"), help="Artifact Registry repo")
-    p.add_argument("--model-1", default=os.getenv("AE_MODEL_1", "gemini-4-argon"), help="Primary AlphaEvolve model")
+    p.add_argument("--ar-repo", default=os.getenv("GCP_AR_REPO", "alpha-inference-images"), help="Artifact Registry repo")
+    p.add_argument("--model-1", default=os.getenv("AE_MODEL_1", ""), help="Optional primary AlphaEvolve model override (empty = server default)")
     p.add_argument("--model-1-weight", type=float, default=float(os.getenv("AE_MODEL_1_WEIGHT", "1.0")))
     p.add_argument("--model-2", default=os.getenv("AE_MODEL_2", ""), help="Optional secondary AlphaEvolve model")
     p.add_argument("--model-2-weight", type=float, default=float(os.getenv("AE_MODEL_2_WEIGHT", "0.0")))
@@ -905,6 +905,10 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
             current_spend_fn=stage_spend_usd,
             parallel_evaluation=False,  # Native async evaluator runs concurrently across `num_evaluators` tasks
         )
+        gen_settings: dict[str, Any] = {"include_full_program_in_prompt": True}
+        if models_cfg:
+            gen_settings["models"] = models_cfg
+
         experiment.create_experiment(
             {
                 "title": f"alpha_inference_{canon_metric}_{int(time.time())}",
@@ -915,10 +919,7 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
                     "max_programs": max_programs + 1,
                     "concurrency": len(worker_pool),
                 },
-                "generation_settings": {
-                    "include_full_program_in_prompt": True,
-                    "models": models_cfg,
-                },
+                "generation_settings": gen_settings,
             }
         )
         seed_fitness = to_alpha_evolve_score(best_val, canon_metric)
@@ -932,9 +933,13 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
         logger.info("Started Official AlphaEvolve Experiment: %s", experiment.experiment_name)
 
         def _refresh_token_stats(exp_info: dict[str, Any] | None) -> None:
+            nonlocal models_cfg
             stats = (exp_info or {}).get("stats") or {}
             in_t = int(stats.get("inputTokenCount") or 0)
             out_t = int(stats.get("outputTokenCount") or 0)
+            srv_models = (((exp_info or {}).get("config") or {}).get("generationSettings") or {}).get("models")
+            if srv_models and not models_cfg:
+                models_cfg = srv_models
             ae_token_state["input_tokens"] = in_t
             ae_token_state["output_tokens"] = out_t
             ae_token_state["llm_spend_usd"] = _estimate_llm_spend(in_t, out_t)

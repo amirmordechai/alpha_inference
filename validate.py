@@ -112,7 +112,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p.add_argument("--project-id", default=os.getenv("GCP_PROJECT_ID", ""), help="Google Cloud project ID")
     p.add_argument("--region", default=os.getenv("GCP_REGION", os.getenv("GCP_REGION_GPU", "us-central1")), help="Vertex GPU region")
-    p.add_argument("--ar-repo", default=os.getenv("GCP_AR_REPO", "geap-models"), help="Artifact Registry repo")
+    p.add_argument("--ar-repo", default=os.getenv("GCP_AR_REPO", "alpha-inference-images"), help="Artifact Registry repo")
     p.add_argument("--out-dir", default="examples/email_triage/results", help="Output directory for validation report")
 
     # Optional regime profiling hook across a multi-day JSONL trace

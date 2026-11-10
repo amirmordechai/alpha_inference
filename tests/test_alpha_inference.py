@@ -369,7 +369,7 @@ def test_live_e2e_skill_workflow_with_native_gcloud_endpoint() -> None:
     project_id = os.environ.get("GCP_PROJECT_ID", "").strip()
     ge_app_id = os.environ.get("GE_APP_ID", "").strip()
     region = os.environ.get("GCP_REGION", "us-central1").strip()
-    ar_repo = os.environ.get("GCP_AR_REPO", "geap-models").strip()
+    ar_repo = os.environ.get("GCP_AR_REPO", "alpha-inference-images").strip()
     model_id_hf = os.environ.get("E2E_MODEL_ID", "google/gemma-4-26B-A4B-it").strip()
     machine_type = os.environ.get("E2E_MACHINE_TYPE", "g4-standard-48").strip()
     accel_type = os.environ.get("E2E_ACCELERATOR_TYPE", "nvidia-rtx-pro-6000").strip()
