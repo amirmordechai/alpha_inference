@@ -77,6 +77,22 @@ def detect_task_mode(
     return "chat"
 
 
+def trace_uses_guided_decoding(rows: Sequence[Mapping[str, Any]]) -> bool:
+    """Return True if any request uses grammar/schema-constrained decoding (`response_format`, `tools`, etc.)."""
+    for req in rows:
+        rf = req.get("response_format")
+        if isinstance(rf, Mapping) and str(rf.get("type") or "").strip().lower() not in ("", "text"):
+            return True
+        if isinstance(rf, str) and rf.strip().lower() not in ("", "text"):
+            return True
+        if req.get("guided_decoding") or req.get("structured_outputs") or req.get("tools"):
+            return True
+        xargs = req.get("vllm_xargs")
+        if isinstance(xargs, Mapping) and any(str(k).startswith("guided_") for k in xargs):
+            return True
+    return False
+
+
 def resolve_completions_url(endpoint_url: str) -> str:
     """Normalize base server URL or full Vertex `:rawPredict` URL."""
     if endpoint_url.endswith(("/chat/completions", ":rawPredict")):
@@ -138,7 +154,18 @@ def build_chat_payload(
         "max_tokens": int(req.get("max_tokens", 64)),
         "temperature": 0.0 if for_equivalence else float(req.get("temperature", 0.0)),
     }
-    for opt_key in ("chat_template_kwargs", "top_p", "presence_penalty", "frequency_penalty", "stop", "response_format"):
+    for opt_key in (
+        "chat_template_kwargs",
+        "top_p",
+        "presence_penalty",
+        "frequency_penalty",
+        "stop",
+        "response_format",
+        "guided_decoding",
+        "structured_outputs",
+        "tools",
+        "tool_choice",
+    ):
         if opt_key in req:
             payload[opt_key] = req[opt_key]
     if for_equivalence:

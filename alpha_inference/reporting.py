@@ -224,7 +224,12 @@ def upgrade_candidate_source_for_evolution(code: str) -> str:
     return upgraded
 
 
-def validate_candidate_spec(cand: CandidateSpec, baseline: CandidateSpec) -> tuple[bool, str]:
+def validate_candidate_spec(
+    cand: CandidateSpec,
+    baseline: CandidateSpec,
+    *,
+    disallow_ngram_speculation: bool = False,
+) -> tuple[bool, str]:
     """Validate untouchable model/precision constraints and custom kernel AST safety."""
     if not cand.vllm_args:
         return False, "vllm_args cannot be empty"
@@ -279,6 +284,13 @@ def validate_candidate_spec(cand: CandidateSpec, baseline: CandidateSpec) -> tup
                 False,
                 f"--speculative-config method={method!r} is not self-contained; "
                 f"allowed: {sorted(ALLOWED_SPECULATIVE_METHODS)}",
+            )
+        if disallow_ngram_speculation and method in {"ngram", "[ngram]", "ngram_gpu", "suffix"}:
+            return (
+                False,
+                f"--speculative-config method={method!r} is disabled because this workload trace uses "
+                "JSON-schema / structured-output / tool guided decoding, which conflicts with n-gram FSM "
+                "rollbacks under concurrent load in vLLM v0.31.0.",
             )
         ext_model = str(spec_obj.get("model") or "").strip()
         if ext_model and ext_model not in ("ngram", "[ngram]", "ngram_gpu", "suffix", baseline.vllm_args[0]):

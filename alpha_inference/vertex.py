@@ -263,7 +263,7 @@ def build_container_launch_spec(
         if hf_token:
             env["HF_TOKEN"] = hf_token
         bootstrap = (
-            'python3 -c "import base64, os, pathlib; '
+            'python3 -c "import base64; import os; import pathlib; '
             "pathlib.Path('/tmp/reload_proxy.py').write_bytes(base64.b64decode(os.environ['AE_PROXY_B64']))\" && "
             "exec python3 /tmp/reload_proxy.py"
         )
@@ -282,7 +282,7 @@ def build_container_launch_spec(
     env["AE_KERNEL_B64"] = base64.b64encode(site_src.encode("utf-8")).decode("ascii")
     bootstrap = (
         "mkdir -p /tmp/ae_kernel && "
-        'python3 -c "import base64, os, pathlib; '
+        'python3 -c "import base64; import os; import pathlib; '
         "pathlib.Path('/tmp/ae_kernel/sitecustomize.py').write_bytes(base64.b64decode(os.environ['AE_KERNEL_B64']))\" && "
         'export PYTHONPATH="/tmp/ae_kernel:${PYTHONPATH:-}" && '
         'exec vllm serve "$@"'
@@ -454,7 +454,7 @@ def build_gcloud_rollout_command(
     """Generate native `gcloud ai models upload` + `gcloud ai endpoints deploy-model` commands for any winner."""
     shm_mb = recommend_shared_memory_mb(machine_type)
     cmd, vllm_args, env, _ = build_container_launch_spec(cand, hot_reload=False, shared_memory_mb=shm_mb)
-    cmd_csv = ",".join(cmd)
+    cmd_csv = "^||^" + "||".join(cmd)
     args_csv = "^||^" + "||".join(vllm_args)
     env_pairs = [f"{k}={v}" for k, v in env.items() if k != "HF_TOKEN"]
     env_flag = f" \\\n  --container-env-vars={shlex.quote('^||^' + '||'.join(env_pairs))}" if env_pairs else ""

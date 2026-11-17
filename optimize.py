@@ -46,7 +46,12 @@ from alpha_evolve.controller import run_controller_loop
 from alpha_evolve.experiment import AlphaEvolveExperiment
 from dotenv import load_dotenv
 
-from alpha_inference.adapters import TASK_MODE_CHOICES, detect_task_mode, load_jsonl_requests
+from alpha_inference.adapters import (
+    TASK_MODE_CHOICES,
+    detect_task_mode,
+    load_jsonl_requests,
+    trace_uses_guided_decoding,
+)
 from alpha_inference.equivalence import EquivalenceReport
 from alpha_inference.evaluator import (
     METRIC_CHOICES,
@@ -251,6 +256,7 @@ def _build_problem_description(
     model_introspect: Mapping[str, Any],
     cont_dir: Path | None,
     prior_eval_offset: int,
+    uses_guided_decoding: bool = False,
 ) -> str:
     problem_guide = (Path(__file__).resolve().parent / "alpha_inference" / "problem.md").read_text(encoding="utf-8")
     prof_summary = json.dumps((gpu_profile or [])[:12], indent=2) if gpu_profile else "[]"
@@ -280,13 +286,21 @@ def _build_problem_description(
 
     stage_note = ""
     if cont_dir is not None:
+        spec_hint = "" if uses_guided_decoding else "GPU n-gram `--speculative-config`, "
         stage_note = (
             f"- **Warm-Started Continuation (Stage 2 from Eval `#{prior_eval_offset}`):** "
             f"Scheduler & attention flags in the seed program already reached `{best_val:.2f} ms` P99 "
             f"(down from `{base_res.p99_latency_ms:.2f} ms`). Prioritize hardware `FP8` (`--quantization=fp8`, "
-            "`--kv-cache-dtype=fp8`), `--kernel-config`, GPU n-gram `--speculative-config`, `moe_tuned_config` "
+            f"`--kv-cache-dtype=fp8`), `--kernel-config`, {spec_hint}`moe_tuned_config` "
             "Triton tile tables, `--compilation-config`, and `@triton.jit` layer fusions!\n"
         )
+    guided_note = (
+        "- **Structured Outputs / JSON-Schema Active:** Workload trace uses grammar-constrained decoding "
+        "(`response_format` / `tools`). Do NOT pass `--speculative-config` (`ngram` / `ngram_gpu`), which "
+        "conflicts with XGrammar FSM rollbacks under concurrent load in `vLLM v0.31.0`.\n"
+        if uses_guided_decoding
+        else ""
+    )
 
     return (
         f"{problem_guide}\n\n"
@@ -297,6 +311,7 @@ def _build_problem_description(
         f"P50=`{base_res.p50_latency_ms:.2f} ms`, Peak Throughput=`{base_res.throughput_rps:.2f} req/s`.\n"
         f"- **Current Seed Record:** `{format_metric(best_val, canon_metric)}` | Engine Internals: `{internals_str}`.\n"
         f"{stage_note}"
+        f"{guided_note}"
         f"- **Hardware:** {gpu_detail} serving `{model_id}`.\n"
         f"- **Live Top GPU CUDA Kernels:**\n```json\n{prof_summary}\n```\n"
         f"{introspect_section}"
@@ -320,6 +335,7 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
     else:
         equiv_path = trace_path
     trace_rows = load_jsonl_requests(trace_path)
+    uses_guided_decoding = trace_uses_guided_decoding(trace_rows)
     resolved_mode = detect_task_mode(trace_rows, requested_mode=args.task_mode, model_name=baseline_cand.vllm_args[0])
     max_programs = max(2, int(args.max_programs))
     num_workers = max(1, int(args.workers))
@@ -347,7 +363,9 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
             (cont_dir / "best_candidate.py").read_text(encoding="utf-8")
         )
         warm_seed_cand = parse_candidate_code(warm_seed_source, name=f"cand_{prior_eval_offset:03d}_warm_seed")
-        ok_ws, ws_msg = validate_candidate_spec(warm_seed_cand, baseline_cand)
+        ok_ws, ws_msg = validate_candidate_spec(
+            warm_seed_cand, baseline_cand, disallow_ngram_speculation=uses_guided_decoding
+        )
         if not ok_ws:
             raise RuntimeError(f"Prior best_candidate.py failed validation: {ws_msg}")
 
@@ -358,6 +376,7 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
             "metric": canon_metric,
             "metric_direction": METRIC_INFO[canon_metric]["direction"],
             "task_mode": resolved_mode,
+            "uses_guided_decoding": uses_guided_decoding,
             "trace_path": str(trace_path),
             "trace_requests": len(trace_rows),
             "equiv_trace_path": str(equiv_path),
@@ -664,7 +683,9 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
                 }
 
             (out_dir / "candidates" / f"cand_{it_num:03d}_{cand.category}.py").write_text(code, encoding="utf-8")
-            ok_spec, spec_reason = validate_candidate_spec(cand, baseline_cand)
+            ok_spec, spec_reason = validate_candidate_spec(
+                cand, baseline_cand, disallow_ngram_speculation=uses_guided_decoding
+            )
             if not ok_spec:
                 fail_eq = EquivalenceReport(False, 0, 0, 0, 0, 0.0, 1.0, spec_reason)
                 fail_res = TraceEvalResult.failed(cand.name, fail_eq)
@@ -860,6 +881,7 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
             model_introspect=model_introspect,
             cont_dir=cont_dir,
             prior_eval_offset=prior_eval_offset,
+            uses_guided_decoding=uses_guided_decoding,
         )
 
         models_cfg = []

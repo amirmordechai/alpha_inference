@@ -17,6 +17,7 @@ from alpha_inference.adapters import (
     ParsedChatResponse,
     detect_task_mode,
     load_jsonl_requests,
+    trace_uses_guided_decoding,
 )
 from alpha_inference.equivalence import compare_chat_responses_kl
 from alpha_inference.evaluator import (
@@ -339,6 +340,37 @@ def test_cli_dry_runs_and_hardware_agnostic_gcloud_rollout() -> None:
     assert "gcloud ai models upload" in gcloud_cmd
     assert "gcloud ai endpoints deploy-model 999888777" in gcloud_cmd
     assert "type=nvidia-tesla-a100,count=1" in gcloud_cmd
+    assert "--container-command='^||^vllm||serve'" in gcloud_cmd
+
+    # Regression test: bootstrap commands with MoE/kernel hooks must use `^||^` so commas never split `--container-command`
+    best_cand = parse_candidate_code(
+        (REPO_ROOT / "examples" / "email_triage" / "results" / "best_candidate.py").read_text(encoding="utf-8"),
+        name="best",
+    )
+    kernel_rollout = build_gcloud_rollout_command(best_cand)
+    assert "--container-command='^||^bash||-lc||" in kernel_rollout
+    assert "import base64, os, pathlib" not in kernel_rollout
+
+    # Regression test: traces using JSON-schema / structured outputs block n-gram speculation in Tier-1 validation
+    schema_rows = [
+        {
+            "request_id": "s1",
+            "messages": [{"role": "user", "content": "emit json"}],
+            "response_format": {"type": "json_schema", "json_schema": {"name": "out", "schema": {"type": "object"}}},
+        }
+    ]
+    assert trace_uses_guided_decoding(schema_rows)
+    assert not trace_uses_guided_decoding([{"request_id": "p1", "messages": [{"role": "user", "content": "plain"}]}])
+    ok_schema, reason_schema = validate_candidate_spec(best_cand, seed_g4, disallow_ngram_speculation=True)
+    assert not ok_schema and "JSON-schema" in reason_schema
+    cand_no_spec = parse_candidate_code(
+        (REPO_ROOT / "examples" / "email_triage" / "results" / "candidates" / "cand_193_cuda_graphs.py").read_text(
+            encoding="utf-8"
+        ),
+        name="c193",
+    )
+    ok_no_spec, msg_no_spec = validate_candidate_spec(cand_no_spec, seed_g4, disallow_ngram_speculation=True)
+    assert ok_no_spec, msg_no_spec
 
 
 def test_coding_agent_onboarding_skill_present() -> None:
