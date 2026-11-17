@@ -5,11 +5,11 @@ Quickstart:
     # 1. Dry-run check ($0 spend):
     python validate.py --dry-run
 
-    # 2. Deploy standalone Baseline & Best Vertex GPU Endpoints, replay 30-min unseen trace 1:1, and tear down:
+    # 2. Deploy standalone Baseline & Best Vertex GPU Endpoints, replay unseen trace 1:1, and tear down:
     python validate.py \
-        --trace examples/email_triage/tuesday_peak_30m.jsonl \
+        --trace examples/custom_openai_chat/sample_trace.jsonl \
         --deploy-vertex --auto-teardown \
-        --out-dir examples/email_triage/results
+        --out-dir results/my_workload
 
     # 3. Validate two already-running endpoints:
     python validate.py \
@@ -30,6 +30,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import aiohttp
 import matplotlib
 
 matplotlib.use("Agg")
@@ -38,18 +39,12 @@ import numpy as np
 from dotenv import load_dotenv
 
 from alpha_inference.adapters import (
-    ParsedChatResponse,
-    ParsedJevResponse,
     TASK_MODE_CHOICES,
     detect_task_mode,
     fetch_gcp_bearer_token,
     load_jsonl_requests,
 )
-from alpha_inference.equivalence import (
-    _fetch_equiv_batch,
-    compare_against_baseline_responses,
-    compare_chat_responses_kl,
-)
+from alpha_inference.equivalence import _fetch_equiv_batch, compare_chat_responses_kl
 from alpha_inference.evaluator import (
     METRIC_CHOICES,
     METRIC_INFO,
@@ -91,7 +86,7 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("--trace", default=default_trace, help="Held-out unseen JSONL production trace")
-    p.add_argument("--task-mode", choices=TASK_MODE_CHOICES, default="auto", help="auto | chat | jev_diffusion")
+    p.add_argument("--task-mode", choices=TASK_MODE_CHOICES, default="auto", help="OpenAI chat workload mode")
     p.add_argument("--metric", choices=METRIC_CHOICES, default="p99_latency", help="Primary target metric")
     p.add_argument("--bucket-sec", type=float, default=60.0, help="Time-series aggregation window in seconds")
 
@@ -114,16 +109,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--region", default=os.getenv("GCP_REGION", os.getenv("GCP_REGION_GPU", "us-central1")), help="Vertex GPU region")
     p.add_argument("--ar-repo", default=os.getenv("GCP_AR_REPO", "alpha-inference-images"), help="Artifact Registry repo")
     p.add_argument("--out-dir", default="examples/email_triage/results", help="Output directory for validation report")
-
-    # Optional regime profiling hook across a multi-day JSONL trace
-    p.add_argument("--week-trace", default="", help="Optional full-week JSONL trace to profile baseline load regimes")
-    p.add_argument("--week-regimes-out", default="", help="Optional output JSON path for baseline week regime telemetry")
     p.add_argument("--dry-run", action="store_true", help="Validate unseen trace & deployment specs with $0 spend")
     return p
 
 
 def plot_unseen_validation(report: dict[str, Any], out_png: Path) -> None:
-    """Render a clean, developer-friendly side-by-side validation chart."""
+    """Render a clean side-by-side validation chart."""
     base = report["baseline"]
     best = report["best_evolved"]
     base_b = base.get("time_buckets") or []
@@ -137,7 +128,6 @@ def plot_unseen_validation(report: dict[str, Any], out_png: Path) -> None:
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
 
-    # Panel 1: Minute-by-minute P99 Latency over the unseen trace
     if base_b and best_b:
         xs_base = [b["start_sec"] / 60.0 for b in base_b]
         ys_base = [b["p99_ms"] for b in base_b]
@@ -145,21 +135,14 @@ def plot_unseen_validation(report: dict[str, Any], out_png: Path) -> None:
         ys_best = [b["p99_ms"] for b in best_b]
         ax1.plot(xs_base, ys_base, color="#ef4444", linewidth=2.2, label=f"Baseline ({base['p99_latency_ms']:.0f} ms P99)")
         ax1.plot(xs_best, ys_best, color="#16a34a", linewidth=2.4, label=f"AlphaEvolve Best ({best['p99_latency_ms']:.0f} ms P99)")
-        ax1.fill_between(
-            xs_base[: min(len(xs_base), len(xs_best))],
-            ys_base[: min(len(xs_base), len(xs_best))],
-            ys_best[: min(len(xs_base), len(xs_best))],
-            color="#bbf7d0",
-            alpha=0.35,
-        )
+        n_overlap = min(len(xs_base), len(xs_best))
+        ax1.fill_between(xs_base[:n_overlap], ys_base[:n_overlap], ys_best[:n_overlap], color="#bbf7d0", alpha=0.35)
         ax1.set_xlabel("Unseen Production Replay Time (minutes)", fontsize=10, fontweight="bold")
         ax1.set_ylabel("P99 Latency (ms)", fontsize=10, fontweight="bold")
         ax1.set_title("1:1 Real-Time Unseen Trace Replay", fontsize=11.5, fontweight="bold")
         ax1.legend(frameon=True, facecolor="white", fontsize=9)
 
-    # Panel 2: Overall P99 Latency & Peak Throughput comparison
     categories = ["P99 Latency (ms)\n(lower is better)", "Sustained Throughput (req/s)\n(higher is better)"]
-    # Normalize each pair to Baseline = 1.0x so both fit cleanly on one axis with exact labels
     base_norm = [1.0, 1.0]
     best_norm = [
         best["p99_latency_ms"] / max(1e-6, base["p99_latency_ms"]),
@@ -175,11 +158,9 @@ def plot_unseen_validation(report: dict[str, Any], out_png: Path) -> None:
     ax2.set_title("Held-Out Production Summary", fontsize=11.5, fontweight="bold")
     ax2.set_ylim(0, max(max(base_norm), max(best_norm)) * 1.28)
 
-    raw_base = [f"{base['p99_latency_ms']:.0f} ms", f"{base['throughput_rps']:.1f} req/s"]
-    raw_best = [f"{best['p99_latency_ms']:.0f} ms", f"{best['throughput_rps']:.1f} req/s"]
-    for bar, txt in zip(bars_b, raw_base):
+    for bar, txt in zip(bars_b, [f"{base['p99_latency_ms']:.0f} ms", f"{base['throughput_rps']:.1f} req/s"]):
         ax2.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.03, txt, ha="center", va="bottom", fontsize=8.8, fontweight="bold", color="#334155")
-    for bar, txt in zip(bars_e, raw_best):
+    for bar, txt in zip(bars_e, [f"{best['p99_latency_ms']:.0f} ms", f"{best['throughput_rps']:.1f} req/s"]):
         ax2.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.03, txt, ha="center", va="bottom", fontsize=8.8, fontweight="bold", color="#15803d")
 
     out_png.parent.mkdir(parents=True, exist_ok=True)
@@ -225,121 +206,6 @@ def append_validation_to_summary(out_dir: Path, report: dict[str, Any]) -> None:
         summary_path.write_text(f"# Alpha Inference Validation Report\n\n{block}", encoding="utf-8")
 
 
-async def profile_week_baseline_regimes(
-    baseline_url: str,
-    week_trace_path: Path,
-    out_json_path: Path,
-    *,
-    task_mode: str,
-    model_name: str,
-    use_gcp_auth: bool,
-) -> dict[str, Any]:
-    """Measure real Ground-Zero GPU latency & throughput across 6 representative traffic regimes of the week."""
-    logger.info("Profiling Ground-Zero Baseline across 7-day traffic regimes from %s...", week_trace_path)
-    all_rows = load_jsonl_requests(week_trace_path)
-    timed = [(parse_timestamp_sec(r.get("timestamp")) or 0.0, r) for r in all_rows]
-    timed.sort(key=lambda x: x[0])
-    t0 = timed[0][0]
-
-    # Group into 168 hourly bins (0..167)
-    hourly_bins: list[list[tuple[float, dict[str, Any]]]] = [[] for _ in range(168)]
-    for ts, r in timed:
-        h = min(167, max(0, int((ts - t0) // 3600.0)))
-        hourly_bins[h].append((ts, r))
-
-    hourly_counts = [len(b) for b in hourly_bins]
-    # Pick 6 representative hours spanning Weekend Low -> Monday 9 AM Peak, replay 25s real-time window of each
-    target_hours = [147, 4, 86, 62, 33, 9]  # Sun night, Mon 4am, Thu afternoon, Wed afternoon, Tue 9am, Mon 9am peak
-    regime_points: list[dict[str, Any]] = []
-
-    for h in target_hours:
-        h_rows = hourly_bins[h]
-        if len(h_rows) < 3:
-            continue
-        win_start = h_rows[0][0]
-        # Take a 25-second slice from the busiest minute of this hour
-        best_slice: list[dict[str, Any]] = []
-        for m in range(60):
-            s0 = win_start + m * 60.0
-            cand_slice = [r for ts, r in h_rows if s0 <= ts < s0 + 25.0]
-            if len(cand_slice) > len(best_slice):
-                best_slice = cand_slice
-        if len(best_slice) < 2:
-            best_slice = [r for _, r in h_rows[: min(12, len(h_rows))]]
-
-        preds, fails, wall_s, _ = await replay_trace_realtime(
-            endpoint_url=baseline_url,
-            rows=best_slice,
-            task_mode=task_mode,  # type: ignore[arg-type]
-            model_name=model_name,
-            use_gcp_auth=use_gcp_auth,
-            warmup_count=4,
-            bucket_sec=25.0,
-        )
-        if preds:
-            lats = np.array([p.e2e_latency_ms for _, p in preds], dtype=np.float64)
-            regime_points.append(
-                {
-                    "hour_idx": h,
-                    "hourly_emails": hourly_counts[h],
-                    "window_rps": round(len(preds) / max(1.0, wall_s), 2),
-                    "p50_ms": round(float(np.percentile(lats, 50)), 2),
-                    "p99_ms": round(float(np.percentile(lats, 99)), 2),
-                    "failures": fails,
-                }
-            )
-
-    sat_rps, _ = await measure_saturation_throughput(
-        endpoint_url=baseline_url,
-        sample_rows=[r for _, r in timed[:480]],
-        task_mode=task_mode,  # type: ignore[arg-type]
-        model_name=model_name,
-        use_gcp_auth=use_gcp_auth,
-        concurrency=160,
-        total_requests=480,
-    )
-
-    # Interpolate smooth 168-hour P50/P99 & throughput curves anchored 100% on measured GPU regime points
-    regime_points.sort(key=lambda d: d["hourly_emails"])
-    xs_emp = np.array([0] + [d["hourly_emails"] for d in regime_points], dtype=np.float64)
-    p99_emp = np.array(
-        [regime_points[0]["p99_ms"] if regime_points else 400.0] + [d["p99_ms"] for d in regime_points],
-        dtype=np.float64,
-    )
-    p50_emp = np.array(
-        [regime_points[0]["p50_ms"] if regime_points else 320.0] + [d["p50_ms"] for d in regime_points],
-        dtype=np.float64,
-    )
-
-    hourly_series = []
-    for h in range(168):
-        cnt = hourly_counts[h]
-        p99_h = float(np.interp(cnt, xs_emp, p99_emp))
-        p50_h = float(np.interp(cnt, xs_emp, p50_emp))
-        avg_rps = round(cnt / 3600.0, 3)
-        peak_burst_rps = round(min(sat_rps, max(avg_rps, cnt / 3600.0 * 4.8)), 2)
-        hourly_series.append(
-            {
-                "hour_of_week": h,
-                "requests": cnt,
-                "avg_rps": avg_rps,
-                "active_throughput_rps": peak_burst_rps,
-                "p50_latency_ms": round(p50_h, 1),
-                "p99_latency_ms": round(p99_h, 1),
-            }
-        )
-
-    out_payload = {
-        "measured_at_utc": datetime.now(timezone.utc).isoformat(),
-        "saturation_ceiling_rps": sat_rps,
-        "empirical_regime_anchors": regime_points,
-        "hourly_168": hourly_series,
-    }
-    out_json_path.parent.mkdir(parents=True, exist_ok=True)
-    out_json_path.write_text(json.dumps(out_payload, indent=2) + "\n", encoding="utf-8")
-    return out_payload
-
-
 async def run_validation(args: argparse.Namespace) -> dict[str, Any]:
     base_cfg_path = Path(args.baseline_config)
     default_best_path = Path(args.out_dir) / "best_candidate.py"
@@ -356,7 +222,7 @@ async def run_validation(args: argparse.Namespace) -> dict[str, Any]:
     rows = load_jsonl_requests(trace_path)
     served_model = extract_flag_value(best_cand.vllm_args, "--served-model-name") or best_cand.vllm_args[0]
     resolved_mode = detect_task_mode(rows, requested_mode=args.task_mode, model_name=best_cand.vllm_args[0])
-    stream_ttft = resolved_mode == "chat" and canon_metric == "ttft"
+    stream_ttft = canon_metric == "ttft"
 
     ts_vals = [parse_timestamp_sec(r.get("timestamp")) for r in rows]
     valid_ts = [t for t in ts_vals if t is not None]
@@ -435,50 +301,32 @@ async def run_validation(args: argparse.Namespace) -> dict[str, Any]:
             args.deploy_vertex or "prediction.vertexai" in base_url or ":rawPredict" in base_url
         )
 
-        # Optional 7-day baseline regime profiling before starting the side-by-side unseen trace replay
-        if args.week_trace and args.week_regimes_out and Path(args.week_trace).exists() and not Path(args.week_regimes_out).exists():
-            await profile_week_baseline_regimes(
-                baseline_url=base_url,
-                week_trace_path=Path(args.week_trace),
-                out_json_path=Path(args.week_regimes_out),
+        logger.info("Starting simultaneous 1:1 real-time unseen trace replay (%d requests, %.1f min)...", len(rows), span_sec / 60.0)
+        (base_preds, base_fails, base_wall, base_buckets), (best_preds, best_fails, best_wall, best_buckets) = await asyncio.gather(
+            replay_trace_realtime(
+                endpoint_url=base_url,
+                rows=rows,
                 task_mode=resolved_mode,
                 model_name=served_model,
                 use_gcp_auth=use_gcp_auth,
-            )
-
-        logger.info(
-            "Starting simultaneous 1:1 real-time unseen trace replay (%d requests, %.1f min)...",
-            len(rows),
-            span_sec / 60.0,
-        )
-        (base_preds, base_fails, base_wall, base_buckets), (best_preds, best_fails, best_wall, best_buckets) = (
-            await asyncio.gather(
-                replay_trace_realtime(
-                    endpoint_url=base_url,
-                    rows=rows,
-                    task_mode=resolved_mode,
-                    model_name=served_model,
-                    use_gcp_auth=use_gcp_auth,
-                    stream_ttft=stream_ttft,
-                    for_equivalence=False,
-                    warmup_count=12,
-                    bucket_sec=args.bucket_sec,
-                ),
-                replay_trace_realtime(
-                    endpoint_url=best_url,
-                    rows=rows,
-                    task_mode=resolved_mode,
-                    model_name=served_model,
-                    use_gcp_auth=use_gcp_auth,
-                    stream_ttft=stream_ttft,
-                    for_equivalence=False,
-                    warmup_count=12,
-                    bucket_sec=args.bucket_sec,
-                ),
-            )
+                stream_ttft=stream_ttft,
+                for_equivalence=False,
+                warmup_count=12,
+                bucket_sec=args.bucket_sec,
+            ),
+            replay_trace_realtime(
+                endpoint_url=best_url,
+                rows=rows,
+                task_mode=resolved_mode,
+                model_name=served_model,
+                use_gcp_auth=use_gcp_auth,
+                stream_ttft=stream_ttft,
+                for_equivalence=False,
+                warmup_count=12,
+                bucket_sec=args.bucket_sec,
+            ),
         )
 
-        # Measure peak sustained throughput on both standalone endpoints
         (base_sat_rps, _), (best_sat_rps, _) = await asyncio.gather(
             measure_saturation_throughput(
                 endpoint_url=base_url,
@@ -500,7 +348,6 @@ async def run_validation(args: argparse.Namespace) -> dict[str, Any]:
             ),
         )
 
-        # Verify live Layer-2 KL output equivalence directly between Baseline and Best on unseen requests
         cal_dict: dict[str, float] | None = None
         cal_path = Path(args.out_dir) / "baseline_responses.calibration.json"
         if cal_path.exists():
@@ -509,52 +356,29 @@ async def run_validation(args: argparse.Namespace) -> dict[str, Any]:
             except Exception:  # noqa: BLE001
                 cal_dict = None
 
-        if resolved_mode == "jev_diffusion":
-            base_by_id = {p.request_id: p for _, p in base_preds}
-            best_only = [p for _, p in best_preds if p.request_id in base_by_id]
-            eq_rep = compare_against_baseline_responses(
-                baseline_map={k: v for k, v in base_by_id.items() if isinstance(v, ParsedJevResponse)},
-                candidate_responses=[p for p in best_only if isinstance(p, ParsedJevResponse)],
-                num_expected=len(best_only),
-                num_failed_http=best_fails,
-                calibration=cal_dict,
+        step = max(1, len(rows) // 100)
+        equiv_sample = [rows[i] for i in range(0, len(rows), step)][:100]
+        tok = fetch_gcp_bearer_token() if use_gcp_auth else None
+        async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=32)) as eq_sess:
+            (eq_base_preds, eq_base_fails, _), (eq_best_preds, eq_best_fails, _) = await asyncio.gather(
+                _fetch_equiv_batch(
+                    eq_sess, base_url, equiv_sample,
+                    task_mode="chat", model_name=served_model, bearer_token=tok, concurrency=8,
+                ),
+                _fetch_equiv_batch(
+                    eq_sess, best_url, equiv_sample,
+                    task_mode="chat", model_name=served_model, bearer_token=tok, concurrency=8,
+                ),
             )
-        else:
-            import aiohttp
-
-            step = max(1, len(rows) // 100)
-            equiv_sample = [rows[i] for i in range(0, len(rows), step)][:100]
-            tok = fetch_gcp_bearer_token() if use_gcp_auth else None
-            async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=32)) as eq_sess:
-                (eq_base_preds, eq_base_fails, _), (eq_best_preds, eq_best_fails, _) = await asyncio.gather(
-                    _fetch_equiv_batch(
-                        eq_sess,
-                        base_url,
-                        equiv_sample,
-                        task_mode="chat",
-                        model_name=served_model,
-                        bearer_token=tok,
-                        concurrency=8,
-                    ),
-                    _fetch_equiv_batch(
-                        eq_sess,
-                        best_url,
-                        equiv_sample,
-                        task_mode="chat",
-                        model_name=served_model,
-                        bearer_token=tok,
-                        concurrency=8,
-                    ),
-                )
-            eq_base_map = {p.request_id: p for p in eq_base_preds if isinstance(p, ParsedChatResponse)}
-            eq_best_list = [p for p in eq_best_preds if isinstance(p, ParsedChatResponse) and p.request_id in eq_base_map]
-            eq_rep = compare_chat_responses_kl(
-                baseline_map=eq_base_map,
-                candidate_responses=eq_best_list,
-                num_expected=len(equiv_sample),
-                num_failed_http=eq_base_fails + eq_best_fails,
-                calibration=cal_dict,
-            )
+        eq_base_map = {p.request_id: p for p in eq_base_preds}
+        eq_best_list = [p for p in eq_best_preds if p.request_id in eq_base_map]
+        eq_rep = compare_chat_responses_kl(
+            baseline_map=eq_base_map,
+            candidate_responses=eq_best_list,
+            num_expected=len(equiv_sample),
+            num_failed_http=eq_base_fails + eq_best_fails,
+            calibration=cal_dict,
+        )
 
         def _summarize(preds: list[tuple[float, Any]], fails: int, wall: float, sat: float, buckets: list[dict[str, float]]) -> dict[str, Any]:
             raw_lats = [p.e2e_latency_ms for _, p in preds] + ([90_000.0] * fails)

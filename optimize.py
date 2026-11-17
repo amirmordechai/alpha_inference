@@ -5,23 +5,23 @@ Quickstart:
     # 1. Dry-run check ($0 spend):
     python optimize.py --dry-run
 
-    # 2. Optimize on managed Vertex AI Dedicated GPU Endpoints (auto-teardown on exit):
+    # 2. Optimize against any live Vertex AI GPU Endpoint (auto-inherits GPU & model; auto-tears down search workers):
     python optimize.py \
-        --trace examples/email_triage/monday_peak_3m.jsonl \
-        --equiv-trace examples/email_triage/equivalence_golden.jsonl \
-        --deploy-vertex --workers 4 --auto-teardown \
+        --vertex-endpoint-id "$VERTEX_ENDPOINT_ID" \
+        --trace examples/custom_openai_chat/sample_trace.jsonl \
         --metric p99_latency \
-        --max-programs 200 \
-        --budget-usd 160
+        --max-programs 100 \
+        --budget-usd 50 \
+        --out-dir results/my_workload
 
-    # 3. Optimize an existing GPU VM or Vertex Endpoint running `alpha_inference.reload_proxy`:
+    # 3. Optimize an existing GPU VM running `alpha_inference.reload_proxy`:
     python optimize.py \
         --trace examples/custom_openai_chat/sample_trace.jsonl \
-        --endpoint http://localhost:8080 --admin-token my-secret \
-        --model Qwen/Qwen2.5-7B-Instruct \
-        --metric ttft \
-        --max-programs 30 \
-        --budget-usd 20
+        --endpoint http://localhost:8080 --admin-token "$AE_ADMIN_TOKEN" \
+        --model google/gemma-4-26B-A4B-it \
+        --metric p99_latency \
+        --max-programs 40 \
+        --budget-usd 25
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ import shutil
 import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 import google.auth
 import google.auth.transport.requests
@@ -89,6 +89,13 @@ from alpha_inference.vertex import (
 
 logger = logging.getLogger("alpha_inference")
 
+LLM_TOKEN_RATES_PER_1M: dict[str, tuple[float, float]] = {
+    "gemini-4-argon": (2.0, 15.0),
+    "gemini-3.1-pro-preview": (2.0, 12.0),
+    "gemini-3.5-flash": (1.5, 9.0),
+    "gemini-2.5-flash": (0.3, 2.5),
+}
+
 
 class BudgetedAlphaEvolveExperiment(AlphaEvolveExperiment):
     """Official `AlphaEvolveExperiment` with a hard USD cloud-spend circuit breaker."""
@@ -137,7 +144,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--trace", "--data", dest="trace", default=default_trace, help="JSONL production request trace")
     p.add_argument("--equiv-trace", default="", help="Optional separate JSONL file for KL equivalence gate (defaults to first 80 rows of --trace)")
-    p.add_argument("--task-mode", choices=TASK_MODE_CHOICES, default="auto", help="auto | chat | jev_diffusion")
+    p.add_argument("--task-mode", choices=TASK_MODE_CHOICES, default="auto", help="OpenAI chat workload mode")
     p.add_argument("--model", default="", help="Optional HuggingFace model override (defaults to candidate.py)")
     p.add_argument("--served-model-name", default="", help="Optional --served-model-name override")
     p.add_argument("--metric", choices=METRIC_CHOICES, default="p99_latency", help="Target metric to optimize")
@@ -149,7 +156,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--hourly-gpu-usd", type=float, default=2.65, help="Per-GPU hourly rate in USD for budget tracking")
     p.add_argument("--confirm-wins", action="store_true", help="Re-verify new record candidates before promoting")
 
-    # Endpoint / Vertex AI / GPU hardware settings (works with any GPU, model, and image)
+    # Endpoint / Vertex AI / GPU hardware settings
     p.add_argument("--vertex-endpoint-id", default="", help="Live Vertex AI Endpoint ID(s) created via `gcloud ai` or Model Garden")
     p.add_argument("--endpoint", "--endpoint-url", dest="endpoint", default="", help="Existing reload_proxy URL(s), comma-separated")
     p.add_argument("--admin-token", default="", help="Admin token(s) for reload_proxy hot-swap")
@@ -184,6 +191,20 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def estimate_llm_spend(args: argparse.Namespace, in_toks: int, out_toks: int) -> float:
+    """Estimate AlphaEvolve LLM token spend in USD from weighted model rates."""
+    m1 = (args.model_1 or "gemini-4-argon").strip()
+    w1 = max(0.0, float(args.model_1_weight or 1.0))
+    m2 = (args.model_2 or "").strip()
+    w2 = max(0.0, float(args.model_2_weight or 0.0)) if (m2 and m2 != m1) else 0.0
+    tot_w = max(1e-6, w1 + w2)
+    r1_in, r1_out = LLM_TOKEN_RATES_PER_1M.get(m1, (2.0, 15.0))
+    r2_in, r2_out = LLM_TOKEN_RATES_PER_1M.get(m2, (2.0, 12.0)) if w2 > 0 else (0.0, 0.0)
+    eff_in = (w1 * r1_in + w2 * r2_in) / tot_w
+    eff_out = (w1 * r1_out + w2 * r2_out) / tot_w
+    return round((in_toks / 1_000_000.0) * eff_in + (out_toks / 1_000_000.0) * eff_out, 4)
+
+
 def _reconstruct_eval_from_tsv_row(row: dict[str, str], num_requests: int) -> TraceEvalResult:
     eq = EquivalenceReport(
         passed=True,
@@ -213,6 +234,72 @@ def _reconstruct_eval_from_tsv_row(row: dict[str, str], num_requests: int) -> Tr
         num_requests=num_requests,
         num_failures=0,
         eval_wall_sec=wall,
+    )
+
+
+def _build_problem_description(
+    *,
+    canon_metric: str,
+    base_res: TraceEvalResult,
+    best_val: float,
+    seed_engine_internals: Mapping[str, float],
+    eff_accel: str,
+    eff_accel_count: int,
+    eff_machine: str,
+    model_id: str,
+    gpu_profile: list[dict[str, Any]] | None,
+    model_introspect: Mapping[str, Any],
+    cont_dir: Path | None,
+    prior_eval_offset: int,
+) -> str:
+    problem_guide = (Path(__file__).resolve().parent / "alpha_inference" / "problem.md").read_text(encoding="utf-8")
+    prof_summary = json.dumps((gpu_profile or [])[:12], indent=2) if gpu_profile else "[]"
+    dir_word = METRIC_INFO[canon_metric]["direction"].upper()
+    score_expr = "`+throughput_rps`" if dir_word == "MAXIMIZE" else f"`-{canon_metric}_ms`"
+
+    gpu_detail = f"`{eff_accel}` (`x{eff_accel_count}` on `{eff_machine}`)"
+    if model_introspect.get("gpu_name"):
+        gpu_detail += f" — `{model_introspect['gpu_name']}` (SM `{model_introspect.get('sm_capability', '?')}`)"
+    dims_json = json.dumps(model_introspect.get("model_dims") or {}, indent=2)
+    vllm_mod_name = model_introspect.get("vllm_model_module", "")
+    hot_src = str(model_introspect.get("hot_layer_source") or "").strip()
+    internals_str = json.dumps(dict(seed_engine_internals)) if seed_engine_internals else "{}"
+
+    introspect_section = ""
+    if model_introspect.get("model_dims") or hot_src:
+        introspect_section = (
+            "\n## Live Introspected Model Dimensions & Target `vLLM` Layer Source\n"
+            f"- **Target `vLLM` Python Module:** `{vllm_mod_name or 'auto'}`\n"
+            f"- **Model Dimensions:**\n```json\n{dims_json}\n```\n"
+        )
+        if hot_src:
+            introspect_section += (
+                "- **Active Model Layer Source (target for `register_vllm_patch` `@triton.jit` fusions):**\n"
+                f"```python\n{hot_src}\n```\n"
+            )
+
+    stage_note = ""
+    if cont_dir is not None:
+        stage_note = (
+            f"- **Warm-Started Continuation (Stage 2 from Eval `#{prior_eval_offset}`):** "
+            f"Scheduler & attention flags in the seed program already reached `{best_val:.2f} ms` P99 "
+            f"(down from `{base_res.p99_latency_ms:.2f} ms`). Prioritize hardware `FP8` (`--quantization=fp8`, "
+            "`--kv-cache-dtype=fp8`), `--kernel-config`, GPU n-gram `--speculative-config`, `moe_tuned_config` "
+            "Triton tile tables, `--compilation-config`, and `@triton.jit` layer fusions!\n"
+        )
+
+    return (
+        f"{problem_guide}\n\n"
+        "## Active Experiment Context\n"
+        f"- **Optimization Objective:** {dir_word} `{canon_metric}` ({METRIC_INFO[canon_metric]['label']}). "
+        f"AlphaEvolve maximizes `fitness_score` = {score_expr}.\n"
+        f"- **Ground-Zero Baseline (`#0`):** P99=`{base_res.p99_latency_ms:.2f} ms`, "
+        f"P50=`{base_res.p50_latency_ms:.2f} ms`, Peak Throughput=`{base_res.throughput_rps:.2f} req/s`.\n"
+        f"- **Current Seed Record:** `{format_metric(best_val, canon_metric)}` | Engine Internals: `{internals_str}`.\n"
+        f"{stage_note}"
+        f"- **Hardware:** {gpu_detail} serving `{model_id}`.\n"
+        f"- **Live Top GPU CUDA Kernels:**\n```json\n{prof_summary}\n```\n"
+        f"{introspect_section}"
     )
 
 
@@ -316,29 +403,8 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
     worker_pool: list[tuple[int, str, str]] = []
     ae_token_state = {"input_tokens": 0, "output_tokens": 0, "llm_spend_usd": 0.0}
 
-    def _estimate_llm_spend(in_toks: int, out_toks: int) -> float:
-        # Weighted USD/1M rate across configured AlphaEvolve models (Argon ~$2/$15, 3.1-Pro ~$2/$12, 3.5-Flash ~$1.5/$9)
-        rates = {
-            "gemini-4-argon": (2.0, 15.0),
-            "gemini-3.1-pro-preview": (2.0, 12.0),
-            "gemini-3.5-flash": (1.5, 9.0),
-            "gemini-2.5-flash": (0.3, 2.5),
-        }
-        m1 = (args.model_1 or "gemini-4-argon").strip()
-        w1 = max(0.0, float(args.model_1_weight or 1.0))
-        m2 = (args.model_2 or "").strip()
-        w2 = max(0.0, float(args.model_2_weight or 0.0)) if (m2 and m2 != m1) else 0.0
-        tot_w = max(1e-6, w1 + w2)
-        r1_in, r1_out = rates.get(m1, (2.0, 15.0))
-        r2_in, r2_out = rates.get(m2, (2.0, 12.0)) if w2 > 0 else (0.0, 0.0)
-        eff_in = (w1 * r1_in + w2 * r2_in) / tot_w
-        eff_out = (w1 * r1_out + w2 * r2_out) / tot_w
-        return round((in_toks / 1_000_000.0) * eff_in + (out_toks / 1_000_000.0) * eff_out, 4)
-
     def stage_gpu_spend_usd() -> float:
-        tracks_vertex_gpus = args.deploy_vertex or any(
-            (":rawPredict" in u or "vertexai" in u) for _, u, _ in worker_pool
-        )
+        tracks_vertex_gpus = args.deploy_vertex or any((":rawPredict" in u or "vertexai" in u) for _, u, _ in worker_pool)
         if not tracks_vertex_gpus:
             return 0.0
         hrs = (time.perf_counter() - t_start) / 3600.0
@@ -351,8 +417,10 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
     def cumulative_spend_usd() -> float:
         return round(prior_spend_usd + stage_spend_usd(), 4)
 
+    auto_teardown_workers = args.auto_teardown
+
     try:
-        # Optional: inspect live --vertex-endpoint-id(s) created via standard `gcloud ai` or Model Garden
+        # 1. Inspect live Vertex AI Endpoint(s) and provision/attach hot-reload GPU workers
         explicit_toks = [t.strip() for t in args.admin_token.split(",") if t.strip()]
         ep_ids = [eid.strip() for eid in args.vertex_endpoint_id.split(",") if eid.strip()]
         inspected_eps = [inspect_vertex_endpoint(args.project_id, args.region, eid) for eid in ep_ids]
@@ -371,21 +439,15 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
                 resolved_mode = detect_task_mode(trace_rows, requested_mode=args.task_mode, model_name=baseline_cand.vllm_args[0])
                 (out_dir / "candidates" / "cand_000_baseline.py").write_text(seed_source, encoding="utf-8")
 
-        # Standard `gcloud ai` endpoints don't embed reload_proxy; clone onto ephemeral hot-reload search workers automatically
         clone_standard_endpoint = bool(inspected_eps) and not any(ep["has_hot_reload"] for ep in inspected_eps) and not explicit_toks
         should_provision_workers = args.deploy_vertex or clone_standard_endpoint
         auto_teardown_workers = args.auto_teardown or clone_standard_endpoint
-
         initial_worker_cand = warm_seed_cand if cont_dir is not None else baseline_cand
-        # 1. Provision or attach GPU worker pool
+
         if should_provision_workers:
             logger.info(
                 "Provisioning %d hot-reload Vertex AI GPU worker(s) (%s x%d on %s) in %s...",
-                num_workers,
-                eff_accel,
-                eff_accel_count,
-                eff_machine,
-                args.region,
+                num_workers, eff_accel, eff_accel_count, eff_machine, args.region,
             )
             if not args.skip_mirror:
                 eff_image = ensure_ar_image_mirrored(args.project_id, args.region, args.ar_repo, upstream_image=eff_image)
@@ -427,7 +489,6 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
             for idx, ep_info in enumerate(inspected_eps):
                 tok = explicit_toks[idx] if idx < len(explicit_toks) else (explicit_toks[0] if explicit_toks else ep_info["admin_token"])
                 worker_pool.append((len(worker_pool), ep_info["chat_completions_url"], tok))
-
             urls = [u.strip() for u in args.endpoint.split(",") if u.strip()]
             if urls:
                 toks = explicit_toks if explicit_toks else [""]
@@ -480,11 +541,7 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
             best_val = float(prior_summary.get("best_value", best_res.metric_value(canon_metric)))
             kept_history = list(prior_summary.get("kept_breakthroughs") or [])
 
-            logger.info(
-                "[Warm-Start #%d] Verifying warm seed (%s) & capturing live kernel/engine telemetry...",
-                prior_eval_offset,
-                warm_seed_cand.plain_title,
-            )
+            logger.info("[Warm-Start #%d] Verifying warm seed (%s) & capturing live telemetry...", prior_eval_offset, warm_seed_cand.plain_title)
             m_ws_before = await scrape_engine_metrics(primary_url, primary_tok, use_gcp_auth=use_gcp_auth)
             ws_check = await evaluate_candidate_on_endpoint(
                 candidate_name=warm_seed_cand.name,
@@ -502,14 +559,6 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
             seed_engine_internals = summarize_engine_metrics_delta(m_ws_before, m_ws_after)
             if not ws_check.equivalence.passed:
                 raise RuntimeError(f"Warm-start seed failed KL equivalence against Ground-Zero baseline: {ws_check.equivalence.reason}")
-            logger.info(
-                "[Warm-Start #%d] Verified live P99=%.2fms (prior record=%.2fms) | KL=%.5f | Internals=%s",
-                prior_eval_offset,
-                ws_check.p99_latency_ms,
-                best_val,
-                ws_check.equivalence.mean_kl_divergence,
-                seed_engine_internals,
-            )
         else:
             if tsv_path.exists():
                 tsv_path.unlink()
@@ -540,21 +589,14 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
             kept_history = []
             logger.info(
                 "[Eval #0] Baseline %s = %s | P99=%.2fms | P50=%.2fms | Throughput=%.2f req/s",
-                canon_metric,
-                format_metric(best_val, canon_metric),
-                base_res.p99_latency_ms,
-                base_res.p50_latency_ms,
-                base_res.throughput_rps,
+                canon_metric, format_metric(best_val, canon_metric),
+                base_res.p99_latency_ms, base_res.p50_latency_ms, base_res.throughput_rps,
             )
 
         gpu_profile, model_introspect = await asyncio.gather(
             capture_gpu_profile(
-                primary_url,
-                primary_tok,
-                sample_req,
-                task_mode=resolved_mode,
-                served_model_name=served_model,
-                use_gcp_auth=use_gcp_auth,
+                primary_url, primary_tok, sample_req,
+                task_mode=resolved_mode, served_model_name=served_model, use_gcp_auth=use_gcp_auth,
             ),
             introspect_endpoint_model(primary_url, primary_tok, use_gcp_auth=use_gcp_auth),
         )
@@ -594,6 +636,7 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
 
         ledger_lock = asyncio.Lock()
         eval_counter = prior_eval_offset
+        experiment_ref: BudgetedAlphaEvolveExperiment | None = None
 
         async def evaluate_alpha_evolve_candidate(program_candidate: dict[str, Any]) -> dict[str, Any]:
             nonlocal eval_counter, best_cand, best_res, best_val, gpu_profile
@@ -607,7 +650,6 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
                 eval_counter += 1
                 it_num = eval_counter
 
-            # Tier 1: Fast static & AST validation (0s GPU cost if invalid)
             try:
                 cand = parse_candidate_code(code, name=f"cand_{it_num:03d}")
             except Exception as exc:  # noqa: BLE001
@@ -633,7 +675,6 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
                     "insights": {"insights": [{"label": "Constraint Violation", "text": spec_reason}]},
                 }
 
-            # Acquire dedicated GPU worker exclusively
             w_idx, w_url, w_tok = await gpu_queue.get()
             try:
                 rel = await reload_endpoint(w_url, w_tok, cand, use_gcp_auth=use_gcp_auth)
@@ -647,9 +688,7 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
                     return {
                         "scores": {"scores": [{"metric": "fitness_score", "score": -900_000.0}]},
                         "insights": {
-                            "insights": [
-                                {"label": "vLLM / Kernel Startup Crash", "text": f"{err_txt}\n{tail_txt}"[:2500]},
-                            ]
+                            "insights": [{"label": "vLLM / Kernel Startup Crash", "text": f"{err_txt}\n{tail_txt}"[:2500]}]
                         },
                     }
 
@@ -672,15 +711,7 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
                 if not res.equivalence.passed:
                     kl_pen = float(max(-800_000.0, -500_000.0 - 10_000.0 * res.equivalence.mean_kl_divergence))
                     async with ledger_lock:
-                        append_results_tsv(
-                            tsv_path,
-                            it_num,
-                            prog_id[:10],
-                            "invalid",
-                            cand,
-                            res,
-                            f"KL GATE FAIL: {res.equivalence.reason}",
-                        )
+                        append_results_tsv(tsv_path, it_num, prog_id[:10], "invalid", cand, res, f"KL GATE FAIL: {res.equivalence.reason}")
                     return {
                         "scores": {"scores": [{"metric": "fitness_score", "score": kl_pen}]},
                         "insights": {
@@ -697,8 +728,6 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
                     }
 
                 cand_val = res.metric_value(canon_metric)
-
-                # Optional confirmation re-run on the same already-warm worker before promoting a new record
                 is_potential_record = is_better(cand_val, best_val, canon_metric)
                 if args.confirm_wins and is_potential_record:
                     res2 = await evaluate_candidate_on_endpoint(
@@ -767,18 +796,14 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
                         kept_history=kept_history,
                         total_evaluated=it_num,
                         spend_usd=cumulative_spend_usd(),
-                        experiment_name=experiment.experiment_name or "",
+                        experiment_name=(experiment_ref.experiment_name or "") if experiment_ref else "",
                         state="IN_PROGRESS",
                     )
 
                 if refresh_prof:
                     new_prof = await capture_gpu_profile(
-                        w_url,
-                        w_tok,
-                        sample_req,
-                        task_mode=resolved_mode,
-                        served_model_name=served_model,
-                        use_gcp_auth=use_gcp_auth,
+                        w_url, w_tok, sample_req,
+                        task_mode=resolved_mode, served_model_name=served_model, use_gcp_auth=use_gcp_auth,
                     )
                     if new_prof:
                         gpu_profile = new_prof
@@ -788,27 +813,14 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
 
                 logger.info(
                     "[Eval #%03d | w%d] %-7s | [%s] %s | %s=%s (best=%s) | P99=%.1fms | Tput=%.1f rps | stage=$%.2f (tot=$%.2f)",
-                    it_num,
-                    w_idx,
-                    status.upper(),
-                    cand.category,
-                    cand.plain_title,
-                    canon_metric,
-                    format_metric(cand_val, canon_metric),
-                    format_metric(best_val, canon_metric),
-                    res.p99_latency_ms,
-                    res.throughput_rps,
-                    stage_spend_usd(),
-                    cumulative_spend_usd(),
+                    it_num, w_idx, status.upper(), cand.category, cand.plain_title,
+                    canon_metric, format_metric(cand_val, canon_metric), format_metric(best_val, canon_metric),
+                    res.p99_latency_ms, res.throughput_rps, stage_spend_usd(), cumulative_spend_usd(),
                 )
 
                 fitness = to_alpha_evolve_score(cand_val, canon_metric)
-                bucket_str = ", ".join(
-                    f"t={int(b['start_sec'])}s:p99={b['p99_ms']:.0f}ms" for b in res.time_buckets[:6]
-                )
-                top_k_str = ", ".join(
-                    f"{k['kernel'][:48]} ({k['pct_gpu_time']:.1f}%)" for k in (gpu_profile or [])[:8]
-                )
+                bucket_str = ", ".join(f"t={int(b['start_sec'])}s:p99={b['p99_ms']:.0f}ms" for b in res.time_buckets[:6])
+                top_k_str = ", ".join(f"{k['kernel'][:48]} ({k['pct_gpu_time']:.1f}%)" for k in (gpu_profile or [])[:8])
                 eng_str = ", ".join(f"{k}={v}" for k, v in eng_delta.items()) if eng_delta else "n/a"
                 return {
                     "scores": {"scores": [{"metric": "fitness_score", "score": fitness}]},
@@ -826,14 +838,8 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
                                     f"30s Windows: [{bucket_str}]"
                                 ),
                             },
-                            {
-                                "label": "Engine Internals (ITL / Queue / Decode / SpecDecode)",
-                                "text": eng_str,
-                            },
-                            {
-                                "label": "Top GPU CUDA Kernels",
-                                "text": top_k_str or "No Kineto kernel profile available.",
-                            },
+                            {"label": "Engine Internals (ITL / Queue / Decode / SpecDecode)", "text": eng_str},
+                            {"label": "Top GPU CUDA Kernels", "text": top_k_str or "No Kineto kernel profile available."},
                         ]
                     },
                 }
@@ -841,54 +847,19 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
                 gpu_queue.put_nowait((w_idx, w_url, w_tok))
 
         # 4. Build Problem Description & Launch Official AlphaEvolve Loop
-        problem_guide = (Path(__file__).resolve().parent / "alpha_inference" / "problem.md").read_text(encoding="utf-8")
-        prof_summary = json.dumps((gpu_profile or [])[:12], indent=2) if gpu_profile else "[]"
-        dir_word = METRIC_INFO[canon_metric]["direction"].upper()
-        score_expr = "`+throughput_rps`" if dir_word == "MAXIMIZE" else f"`-{canon_metric}_ms`"
-
-        gpu_detail = f"`{eff_accel}` (`x{eff_accel_count}` on `{eff_machine}`)"
-        if model_introspect.get("gpu_name"):
-            gpu_detail += f" — `{model_introspect['gpu_name']}` (SM `{model_introspect.get('sm_capability', '?')}`)"
-        dims_json = json.dumps(model_introspect.get("model_dims") or {}, indent=2)
-        vllm_mod_name = model_introspect.get("vllm_model_module", "")
-        hot_src = str(model_introspect.get("hot_layer_source") or "").strip()
-        internals_str = json.dumps(seed_engine_internals) if seed_engine_internals else "{}"
-
-        introspect_section = ""
-        if model_introspect.get("model_dims") or hot_src:
-            introspect_section = (
-                "\n## Live Introspected Model Dimensions & Target `vLLM` Layer Source\n"
-                f"- **Target `vLLM` Python Module:** `{vllm_mod_name or 'auto'}`\n"
-                f"- **Model Dimensions:**\n```json\n{dims_json}\n```\n"
-            )
-            if hot_src:
-                introspect_section += (
-                    "- **Active Model Layer Source (target for `register_vllm_patch` `@triton.jit` fusions):**\n"
-                    f"```python\n{hot_src}\n```\n"
-                )
-
-        stage_note = ""
-        if cont_dir is not None:
-            stage_note = (
-                f"- **Warm-Started Continuation (Stage 2 from Eval `#{prior_eval_offset}`):** "
-                f"Scheduler & attention flags in the seed program already reached `{best_val:.2f} ms` P99 "
-                f"(down from `{base_res.p99_latency_ms:.2f} ms`). Prioritize hardware `FP8` (`--quantization=fp8`, "
-                "`--kv-cache-dtype=fp8`), `--kernel-config`, GPU n-gram `--speculative-config`, `moe_tuned_config` "
-                "Triton tile tables, `--compilation-config`, and `@triton.jit` layer fusions!\n"
-            )
-
-        full_problem_description = (
-            f"{problem_guide}\n\n"
-            "## Active Experiment Context\n"
-            f"- **Optimization Objective:** {dir_word} `{canon_metric}` ({METRIC_INFO[canon_metric]['label']}). "
-            f"AlphaEvolve maximizes `fitness_score` = {score_expr}.\n"
-            f"- **Ground-Zero Baseline (`#0`):** P99=`{base_res.p99_latency_ms:.2f} ms`, "
-            f"P50=`{base_res.p50_latency_ms:.2f} ms`, Peak Throughput=`{base_res.throughput_rps:.2f} req/s`.\n"
-            f"- **Current Seed Record:** `{format_metric(best_val, canon_metric)}` | Engine Internals: `{internals_str}`.\n"
-            f"{stage_note}"
-            f"- **Hardware:** {gpu_detail} serving `{baseline_cand.vllm_args[0]}`.\n"
-            f"- **Live Top GPU CUDA Kernels:**\n```json\n{prof_summary}\n```\n"
-            f"{introspect_section}"
+        full_problem_description = _build_problem_description(
+            canon_metric=canon_metric,
+            base_res=base_res,
+            best_val=best_val,
+            seed_engine_internals=seed_engine_internals,
+            eff_accel=eff_accel,
+            eff_accel_count=eff_accel_count,
+            eff_machine=eff_machine,
+            model_id=baseline_cand.vllm_args[0],
+            gpu_profile=gpu_profile,
+            model_introspect=model_introspect,
+            cont_dir=cont_dir,
+            prior_eval_offset=prior_eval_offset,
         )
 
         models_cfg = []
@@ -903,8 +874,9 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
             max_programs_evaluated=max_programs,
             budget_usd=args.budget_usd,
             current_spend_fn=stage_spend_usd,
-            parallel_evaluation=False,  # Native async evaluator runs concurrently across `num_evaluators` tasks
+            parallel_evaluation=False,
         )
+        experiment_ref = experiment
         gen_settings: dict[str, Any] = {"include_full_program_in_prompt": True}
         if models_cfg:
             gen_settings["models"] = models_cfg
@@ -914,19 +886,14 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
                 "title": f"alpha_inference_{canon_metric}_{int(time.time())}",
                 "problem_description": full_problem_description,
                 "program_language": "python",
-                "run_settings": {
-                    # Backend `max_programs` includes the initial seed program (#0)
-                    "max_programs": max_programs + 1,
-                    "concurrency": len(worker_pool),
-                },
+                "run_settings": {"max_programs": max_programs + 1, "concurrency": len(worker_pool)},
                 "generation_settings": gen_settings,
             }
         )
-        seed_fitness = to_alpha_evolve_score(best_val, canon_metric)
         experiment.create_initial_program(
             {
                 "content": {"files": [{"path": "candidate.py", "content": warm_seed_source}]},
-                "evaluation": {"scores": {"scores": [{"metric": "fitness_score", "score": seed_fitness}]}},
+                "evaluation": {"scores": {"scores": [{"metric": "fitness_score", "score": to_alpha_evolve_score(best_val, canon_metric)}]}},
             }
         )
         experiment.start_experiment()
@@ -942,7 +909,7 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
                 models_cfg = srv_models
             ae_token_state["input_tokens"] = in_t
             ae_token_state["output_tokens"] = out_t
-            ae_token_state["llm_spend_usd"] = _estimate_llm_spend(in_t, out_t)
+            ae_token_state["llm_spend_usd"] = estimate_llm_spend(args, in_t, out_t)
 
         async def _auto_resume_watchdog() -> None:
             while not experiment.stopping_criteria_met():
@@ -950,9 +917,7 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
                 if experiment.stopping_criteria_met() or not experiment.experiment_name:
                     break
                 try:
-                    info = await asyncio.to_thread(
-                        ae_client.get_alpha_evolve_experiment, experiment.experiment_name
-                    )
+                    info = await asyncio.to_thread(ae_client.get_alpha_evolve_experiment, experiment.experiment_name)
                     _refresh_token_stats(info)
                     st = str((info or {}).get("state", "")).strip().upper()
                     if "PAUSED" in st and not experiment.stopping_criteria_met():
@@ -978,9 +943,7 @@ async def run_optimization(args: argparse.Namespace) -> dict[str, Any]:
             await asyncio.gather(watchdog_task, return_exceptions=True)
             if experiment.experiment_name:
                 try:
-                    final_info = await asyncio.to_thread(
-                        ae_client.get_alpha_evolve_experiment, experiment.experiment_name
-                    )
+                    final_info = await asyncio.to_thread(ae_client.get_alpha_evolve_experiment, experiment.experiment_name)
                     _refresh_token_stats(final_info)
                 except Exception:  # noqa: BLE001
                     pass
